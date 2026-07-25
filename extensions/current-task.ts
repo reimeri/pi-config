@@ -22,6 +22,16 @@ function taskLength(value: string): number {
 	return Array.from(value).length;
 }
 
+function modeBorderColor(
+	modes: EditorTopBarMode[],
+	warning: (text: string) => string,
+	error: (text: string) => string,
+): ((text: string) => string) | undefined {
+	if (modes.some((mode) => mode.borderColor === "error")) return error;
+	if (modes.some((mode) => mode.borderColor === "warning")) return warning;
+	return undefined;
+}
+
 function modesForWidth(modes: EditorTopBarMode[], width: number): string {
 	if (modes.length === 0 || width <= 0) return "";
 
@@ -89,21 +99,32 @@ class CurrentTaskEditor extends CustomEditor {
 		private readonly getModes: () => EditorTopBarMode[],
 		private readonly accent: (text: string) => string,
 		private readonly warning: (text: string) => string,
+		private readonly error: (text: string) => string,
 	) {
 		super(tui, theme, keybindings);
 	}
 
 	render(width: number): string[] {
-		const lines = super.render(width);
 		const task = normalizeTask(this.getTask() ?? "");
 		const modes = this.getModes();
+		const defaultBorderColor = this.borderColor;
+		const activeBorderColor = modeBorderColor(modes, this.warning, this.error) ?? defaultBorderColor;
+
+		this.borderColor = activeBorderColor;
+		let lines: string[];
+		try {
+			lines = super.render(width);
+		} finally {
+			this.borderColor = defaultBorderColor;
+		}
+
 		if ((!task && modes.length === 0) || lines.length === 0) return lines;
 
 		lines[0] = editorTopBar(
 			task,
 			modes,
 			width,
-			(text) => this.borderColor(text),
+			activeBorderColor,
 			this.accent,
 			this.warning,
 		);
@@ -123,11 +144,16 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 		if (typeof update.label === "string" && update.label.trim()) {
 			const label = normalizeTask(update.label);
 			const compactLabel = normalizeTask(update.compactLabel ?? label);
+			const borderColor =
+				update.borderColor === "warning" || update.borderColor === "error"
+					? update.borderColor
+					: undefined;
 			activeModes.set(update.id, {
 				id: update.id,
 				label,
 				compactLabel: compactLabel || label,
 				priority: Number.isFinite(update.priority) ? (update.priority ?? 0) : 0,
+				borderColor,
 			});
 		} else {
 			activeModes.delete(update.id);
@@ -215,6 +241,7 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 				getActiveModes,
 				(text) => ctx.ui.theme.fg("accent", text),
 				(text) => ctx.ui.theme.fg("warning", text),
+				(text) => ctx.ui.theme.fg("error", text),
 			);
 		});
 	});

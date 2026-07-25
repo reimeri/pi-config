@@ -77,6 +77,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 		setEditorTopBarMode(pi, STATUS_ID, enabled ? "🔒 quarantine" : undefined, {
 			compactLabel: "🔒",
 			priority: 100,
+			borderColor: "error",
 		});
 	}
 

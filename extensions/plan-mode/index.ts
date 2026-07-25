@@ -73,6 +73,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		setEditorTopBarMode(pi, "plan-mode", planModeEnabled ? "⏸️ plan" : undefined, {
 			compactLabel: "⏸️",
 			priority: 10,
+			borderColor: "warning",
 		});
 	}
 
