@@ -32,4 +32,4 @@ await setToolMode(pi.events, mode, false, {
 });
 ```
 
-When `persist` is requested, the coordinator atomically records the shared baseline and active mode IDs as the canonical restoration state. It reapplies active policies before agent runs and after turns, and restores the baseline during session shutdown. Individual modes remain responsible for their prompts, UI, tool-call guards, and any legacy-compatible state entries.
+When `persist` is requested, the coordinator atomically records the shared baseline and active mode IDs as the canonical restoration state. It reapplies active policies before agent runs and after turns, and restores the baseline during session shutdown. Before every model turn it also appends hidden context with the reconciled active modes and tools, including locally reported fail-closed modes, preventing stale conversation history from making the model treat a disabled mode as active. Individual modes remain responsible for their prompts, UI, tool-call guards, and any legacy-compatible state entries.

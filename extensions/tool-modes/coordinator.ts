@@ -16,6 +16,17 @@ export interface ToolModeCoordinatorSnapshot {
 	activeTools: string[];
 }
 
+export function formatToolModeStatus(
+	state: Pick<ToolModeResult, "activeModeIds" | "activeTools">,
+): string {
+	const activeModes = state.activeModeIds.length > 0 ? state.activeModeIds.join(", ") : "none";
+	const activeTools = state.activeTools.length > 0 ? state.activeTools.join(", ") : "none";
+	return `[CURRENT TOOL MODE STATE]
+This state is authoritative for the current model turn. Ignore earlier conversation claims about which tool modes or tools are active.
+Active restrictive modes: ${activeModes}
+Active tools: ${activeTools}`;
+}
+
 export class ToolModeCoordinator {
 	private readonly activeModes = new Map<string, ToolModeDefinition>();
 	private baselineTools: string[] | undefined;

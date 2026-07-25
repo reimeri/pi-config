@@ -214,7 +214,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 	const unsubscribeLocalStatus = pi.events.on(LOCAL_TOOL_MODE_STATUS_EVENT, (data) => {
 		if (!enabled || !data || typeof data !== "object") return;
 		const report = (data as { report?: unknown }).report;
-		if (typeof report === "function") report("quarantine");
+		if (typeof report === "function") report("quarantine", quarantineTools());
 	});
 
 	pi.registerCommand("quarantine", {

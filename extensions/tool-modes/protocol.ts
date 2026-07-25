@@ -176,19 +176,34 @@ export function persistedToolModeBaseline(ctx: ExtensionContext): string[] | und
 	return cycleBaseline ?? lastRestored;
 }
 
-export function locallyActiveToolModes(events: ExtensionAPI["events"]): string[] {
-	const activeModeIds = new Set<string>();
+export interface LocalToolModeReport {
+	modeId: string;
+	enforcedTools?: string[];
+}
+
+export function locallyActiveToolModeReports(
+	events: ExtensionAPI["events"],
+): LocalToolModeReport[] {
+	const reports = new Map<string, LocalToolModeReport>();
 	try {
 		events.emit(LOCAL_TOOL_MODE_STATUS_EVENT, {
-			report: (modeId: string) => {
-				if (modeId.length > 0) activeModeIds.add(modeId);
+			report: (modeId: string, enforcedTools?: string[]) => {
+				if (modeId.length === 0) return;
+				reports.set(modeId, {
+					modeId,
+					enforcedTools: enforcedTools ? stateToolNames(enforcedTools) : undefined,
+				});
 			},
 		});
 	} catch {
 		// Coordinator reconciliation remains the primary source; local reporting
 		// is defense in depth for emergency fail-closed mode state.
 	}
-	return [...activeModeIds];
+	return [...reports.values()];
+}
+
+export function locallyActiveToolModes(events: ExtensionAPI["events"]): string[] {
+	return locallyActiveToolModeReports(events).map((report) => report.modeId);
 }
 
 export function reconcileToolModes(

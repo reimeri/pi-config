@@ -1,9 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { ToolModeCoordinator } from "./coordinator.ts";
+import { formatToolModeStatus, ToolModeCoordinator } from "./coordinator.ts";
 import {
 	TOOL_MODE_REQUEST_EVENT,
 	TOOL_MODE_STATE_ENTRY_TYPE,
 	TOOL_MODE_STATE_VERSION,
+	locallyActiveToolModeReports,
 	type ToolModeCoordinatorState,
 	type ToolModeRequest,
 	type ToolModeResult,
@@ -68,6 +69,35 @@ function isToolModeRequest(value: unknown): value is ToolModeRequest {
 
 export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 	const coordinator = new ToolModeCoordinator(pi);
+
+	function reconcileWithLocalFailClosedModes(): ToolModeResult {
+		const localReports = locallyActiveToolModeReports(pi.events);
+		const toolsBeforeReconcile = pi.getActiveTools();
+		const result = coordinator.reconcile();
+		const coordinatedModeIds = new Set(result.activeModeIds);
+		const fallbackReports = localReports.filter(
+			(report) => !coordinatedModeIds.has(report.modeId),
+		);
+		if (fallbackReports.length > 0) {
+			const enforcedToolSets = fallbackReports.flatMap((report) =>
+				report.enforcedTools ? [report.enforcedTools] : [],
+			);
+			let failClosedTools = enforcedToolSets[0] ?? toolsBeforeReconcile;
+			for (const enforcedTools of enforcedToolSets.slice(1)) {
+				const allowed = new Set(enforcedTools);
+				failClosedTools = failClosedTools.filter((name) => allowed.has(name));
+			}
+			pi.setActiveTools(failClosedTools);
+		}
+		return {
+			...result,
+			activeModeIds: [
+				...new Set([...result.activeModeIds, ...localReports.map((report) => report.modeId)]),
+			],
+			activeTools: pi.getActiveTools(),
+		};
+	}
+
 	const unsubscribe = pi.events.on(TOOL_MODE_REQUEST_EVENT, (data) => {
 		if (!isToolModeRequest(data)) {
 			if (data && typeof data === "object") {
@@ -110,10 +140,29 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 	// Reassert active policies around every model turn so tools dynamically
 	// activated by another extension cannot escape a restrictive mode.
 	pi.on("before_agent_start", () => {
-		coordinator.reconcile();
+		reconcileWithLocalFailClosedModes();
+	});
+	pi.on("context", (event) => {
+		const state = reconcileWithLocalFailClosedModes();
+		const status = formatToolModeStatus(state);
+		return {
+			messages: [
+				...event.messages.filter(
+					(message) =>
+						message.role !== "custom" || message.customType !== "tool-mode-current-state",
+				),
+				{
+					role: "custom" as const,
+					customType: "tool-mode-current-state",
+					content: status,
+					display: false,
+					timestamp: Date.now(),
+				},
+			],
+		};
 	});
 	pi.on("turn_end", () => {
-		coordinator.reconcile();
+		reconcileWithLocalFailClosedModes();
 	});
 
 	// A replacement session inherits the process-wide active tool set. Restore
