@@ -166,8 +166,14 @@ async function manageJob(
 		if (action === "View logs") await showLogs(manager, id, ctx);
 		if (action === "Kill job") await killWithConfirmation(manager, id, ctx);
 		if (action === "Clear record") {
-			manager.clear(id);
-			ctx.ui.notify(`Cleared ${id}`, "info");
+			// The job can have been cleared elsewhere, or come back to life through a
+			// surviving descendant, between rendering this menu and choosing from it.
+			try {
+				manager.clear(id);
+				ctx.ui.notify(`Cleared ${id}`, "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
 			return;
 		}
 	}

@@ -3,6 +3,11 @@ import { access } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { BoundedLogBuffer } from "./log-buffer.ts";
+import {
+	compileReadinessMatcher,
+	scanReadinessWindows,
+	type ReadinessMatcher,
+} from "./readiness.ts";
 import type {
 	BackgroundJobSnapshot,
 	BackgroundLogRead,
@@ -21,7 +26,7 @@ interface ManagedJob {
 	stdoutDecoder: StringDecoder;
 	stderrDecoder: StringDecoder;
 	outputListeners: Set<(text: string) => void>;
-	readinessMatcher?: (output: string) => boolean;
+	readinessMatcher?: ReadinessMatcher;
 	readinessWindow: string;
 	readinessMatchedAt?: number;
 	closePromise: Promise<void>;
@@ -42,94 +47,6 @@ function isFinalStatus(status: BackgroundJobSnapshot["status"]): boolean {
 
 function delay(milliseconds: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-const READINESS_MATCH_WINDOW = 64 * 1024;
-const READINESS_MATCH_OVERLAP = 2 * 1024;
-
-function validateSafeRegex(pattern: string): void {
-	if (pattern.length > 1000) throw new Error("Readiness regex cannot exceed 1000 characters");
-	let escaped = false;
-	let inCharacterClass = false;
-	let maximumMatchWidth = 0;
-	let previousTokenWidth = 0;
-	for (let index = 0; index < pattern.length; index++) {
-		const character = pattern[index];
-		if (escaped) {
-			if (!inCharacterClass && /[1-9]/u.test(character)) {
-				throw new Error("Readiness regex backreferences are not supported");
-			}
-			if (!inCharacterClass) {
-				maximumMatchWidth++;
-				previousTokenWidth = 1;
-			}
-			escaped = false;
-			continue;
-		}
-		if (character === "\\") {
-			escaped = true;
-			continue;
-		}
-		if (character === "[") {
-			inCharacterClass = true;
-			maximumMatchWidth++;
-			previousTokenWidth = 1;
-			continue;
-		}
-		if (character === "]") {
-			inCharacterClass = false;
-			continue;
-		}
-		if (inCharacterClass) continue;
-		if (character === "(" || character === ")" || character === "|") {
-			throw new Error("Readiness regex groups and alternation are not supported");
-		}
-		if (character === "*" || character === "+") {
-			throw new Error("Readiness regex unbounded quantifiers are not supported; use a bounded range");
-		}
-		if (character === "?") continue;
-		if (character === "{") {
-			const closing = pattern.indexOf("}", index + 1);
-			if (closing === -1) continue;
-			const range = pattern.slice(index + 1, closing);
-			if (/^\d+,$/u.test(range)) throw new Error("Readiness regex unbounded ranges are not supported");
-			const maximum = range.match(/^\d+,(\d+)$/u)?.[1] ?? range.match(/^\d+$/u)?.[0];
-			if (maximum) {
-				const maximumValue = Number(maximum);
-				if (maximumValue > 1000) {
-					throw new Error("Readiness regex bounded ranges cannot exceed 1000");
-				}
-				maximumMatchWidth += previousTokenWidth * (maximumValue - 1);
-				index = closing;
-				continue;
-			}
-		}
-		if (character === "^" || character === "$") {
-			previousTokenWidth = 0;
-			continue;
-		}
-		maximumMatchWidth++;
-		previousTokenWidth = 1;
-	}
-	if (maximumMatchWidth > READINESS_MATCH_OVERLAP) {
-		throw new Error(`Readiness regex maximum match width cannot exceed ${READINESS_MATCH_OVERLAP} characters`);
-	}
-}
-
-function compileReadinessMatcher(request: ReadinessRequest): (output: string) => boolean {
-	if (request.type === "substring") return (output) => output.includes(request.pattern);
-	validateSafeRegex(request.pattern);
-	const expression = new RegExp(request.pattern);
-	return (output) => expression.test(output);
-}
-
-function scanReadinessWindows(matcher: (output: string) => boolean, output: string): boolean {
-	if (output.length <= READINESS_MATCH_WINDOW) return matcher(output);
-	const step = READINESS_MATCH_WINDOW - READINESS_MATCH_OVERLAP;
-	for (let start = 0; start < output.length; start += step) {
-		if (matcher(output.slice(start, start + READINESS_MATCH_WINDOW))) return true;
-	}
-	return false;
 }
 
 export class BackgroundProcessManager {
@@ -277,7 +194,8 @@ export class BackgroundProcessManager {
 
 	async kill(id: string): Promise<BackgroundJobSnapshot> {
 		const job = this.requireJob(id);
-		if (isFinalStatus(job.snapshot.status) && !this.processGroupExists(job)) {
+		const statusBeforeKill = job.snapshot.status;
+		if (isFinalStatus(statusBeforeKill) && !this.processGroupExists(job)) {
 			return this.snapshot(job);
 		}
 		job.snapshot.status = "stopping";
@@ -304,7 +222,9 @@ export class BackgroundProcessManager {
 			job.child.stderr?.destroy();
 			this.finalizeJob(job, null, "SIGKILL");
 		} else {
-			job.snapshot.status = "killed";
+			// The shell leader had already finished; only its lingering descendants were
+			// signalled. Keep the real outcome instead of relabelling an exit as a kill.
+			job.snapshot.status = isFinalStatus(statusBeforeKill) ? statusBeforeKill : "killed";
 		}
 		return this.snapshot(job);
 	}
@@ -357,12 +277,15 @@ export class BackgroundProcessManager {
 		const append = (stream: "stdout" | "stderr", text: string) => {
 			const appended = job.buffer.append(stream, text);
 			if (!appended) return;
-			if (job.readinessMatcher && job.readinessMatchedAt === undefined) {
+			const matcher = job.readinessMatcher;
+			if (matcher && job.readinessMatchedAt === undefined && !matcher.exhausted) {
 				const candidate = job.readinessWindow + appended;
-				if (scanReadinessWindows(job.readinessMatcher, candidate)) {
+				if (scanReadinessWindows(matcher, candidate)) {
 					job.readinessMatchedAt = Date.now();
 				}
-				job.readinessWindow = candidate.slice(-READINESS_MATCH_WINDOW);
+				// Retain only what a single match can span. Keeping a full window here
+				// made every chunk rescan 64KB of already-examined output.
+				job.readinessWindow = matcher.overlap > 0 ? candidate.slice(-matcher.overlap) : "";
 			}
 			for (const listener of [...job.outputListeners]) listener(appended);
 		};
@@ -425,6 +348,7 @@ export class BackgroundProcessManager {
 			};
 			const checkOutput = () => {
 				if (job.readinessMatchedAt !== undefined) finish("ready");
+				else if (job.readinessMatcher?.exhausted) finish("budget_exceeded");
 			};
 			const onAbort = () => finish("aborted");
 			const timeout = setTimeout(() => finish("timed_out"), request.timeoutMs);

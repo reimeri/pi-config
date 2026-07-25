@@ -340,7 +340,12 @@ export function registerBackgroundTerminalTools(
 				Type.Integer({ minimum: 0, description: "Opaque next_cursor returned by a previous background_logs call" }),
 			),
 			tail_lines: Type.Optional(
-				Type.Integer({ minimum: 1, maximum: DEFAULT_MAX_LINES, description: "Return only this many trailing lines" }),
+				Type.Integer({
+					minimum: 1,
+					maximum: DEFAULT_MAX_LINES,
+					description:
+						"Maximum lines to return. Without a cursor these are the newest lines; with a cursor they are the next lines following it.",
+				}),
 			),
 		}),
 		async execute(_toolCallId, params) {

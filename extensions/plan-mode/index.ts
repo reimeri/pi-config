@@ -1,8 +1,14 @@
 /**
  * Plan Mode Extension
  *
- * Read-only exploration mode for safe code analysis.
+ * Exploration mode that steers the agent toward planning instead of implementing.
  * When enabled, built-in write tools are disabled.
+ *
+ * NOT a security boundary. Plan mode is a nudge, not a sandbox: only `bash` is
+ * allowlisted, so tools that reach a shell by another route (background_start,
+ * subagent) stay active, and the allowlist itself is pattern-based rather than
+ * airtight. Use quarantine for an enforced restriction — it applies an absolute
+ * policy plus a default-deny tool_call gate. See README.md.
  *
  * Features:
  * - /plan command or Ctrl+Alt+P to toggle
@@ -296,20 +302,9 @@ Do NOT attempt to make changes - just describe what you would do.`,
 				return;
 			}
 
-			const replacement = await requestTodosFromPlan(
-				pi.events,
-				planSteps.map((step) => step.text),
-				"Created from the approved plan",
-			);
-			if (replacement.status === "cancelled") {
-				ctx.ui.notify("Plan execution cancelled; existing TODOs were kept.", "info");
-				return;
-			}
-			if (replacement.status === "unavailable") {
-				ctx.ui.notify(`Cannot execute plan: ${replacement.message}`, "error");
-				return;
-			}
-
+			// Leave plan mode before replacing TODOs. Replacing the user's unfinished
+			// list is the destructive step; the mode switch is the reversible one, so it
+			// has to go first or a failed switch strands an already-destroyed TODO list.
 			if (
 				!(await setPlanModeTools(false, ctx, {
 					baselinePatch: { add: [TODO_TOOL_NAME] },
@@ -319,6 +314,24 @@ Do NOT attempt to make changes - just describe what you would do.`,
 				return;
 			}
 			planModeEnabled = false;
+
+			const replacement = await requestTodosFromPlan(
+				pi.events,
+				planSteps.map((step) => step.text),
+				"Created from the approved plan",
+			);
+			if (replacement.status !== "applied") {
+				if (await setPlanModeTools(true, ctx, { persist: true })) planModeEnabled = true;
+				updateModeIndicator(ctx);
+				persistState(ctx);
+				if (replacement.status === "cancelled") {
+					ctx.ui.notify("Plan execution cancelled; existing TODOs were kept.", "info");
+				} else {
+					ctx.ui.notify(`Cannot execute plan: ${replacement.message}`, "error");
+				}
+				return;
+			}
+
 			updateModeIndicator(ctx);
 			persistState(ctx);
 

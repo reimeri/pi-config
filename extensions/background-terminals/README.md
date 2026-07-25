@@ -24,6 +24,10 @@ A readiness timeout leaves the process running so the agent can inspect its logs
 
 Regex readiness intentionally supports a safe subset: groups, alternation, backreferences, all unbounded quantifiers, and unbounded ranges are rejected. Use bounded forms such as `\\d{1,6}` instead of `\\d+`. The maximum possible match width is limited to the rolling-window overlap so cross-chunk matches remain reliable and readiness checks cannot grow with total log size.
 
+Structural restrictions alone do not bound backtracking, because adjacent bounded quantifiers multiply: `.{1,900}.{1,900}x` contains no rejected construct yet needs roughly 810,000 attempts per starting offset. Patterns are therefore also charged a backtracking budget — the product of the alternatives each variable-length quantifier can try (`{n,m}` contributes `m - n + 1`, `?` contributes 2) — which must stay under 1000. `\\d{1,6}` and `Server started.{0,20}port` pass comfortably; two wide quantifiers in the same pattern do not.
+
+As a backstop, regex matching is given a cumulative 250 ms budget per job. A pattern that exceeds it is abandoned, readiness resolves as `budget_exceeded`, and the job keeps running so its logs can still be read.
+
 ### `background_list`
 
 Lists all jobs in the current Pi session. Completed jobs remain listed until they are cleared or the session ends. An optional `status` parameter filters the result.
@@ -36,7 +40,7 @@ Parameters:
 
 - `id` — job ID such as `bg-1`.
 - `cursor` — optional opaque `next_cursor` from an earlier call. Supplying it returns the next bounded page of newer output; continue with each returned cursor until caught up.
-- `tail_lines` — optional number of trailing lines to return.
+- `tail_lines` — optional cap on how many lines to return. Without a cursor these are the newest lines; with a cursor they are the next lines following it.
 
 The result reports when the requested cursor predates retained output.
 

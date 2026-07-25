@@ -14,7 +14,9 @@ export type ReadinessStatus =
 	| "ready"
 	| "timed_out"
 	| "exited"
-	| "aborted";
+	| "aborted"
+	/** Pattern matching was abandoned for exceeding its time budget; the job keeps running. */
+	| "budget_exceeded";
 
 export type ReadinessPatternType = "substring" | "regex";
 

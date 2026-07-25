@@ -1,6 +1,8 @@
+import type { ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { setToolMode, type ToolModeDefinition } from "./tool-modes/protocol.ts";
 
 interface QuestionOption {
 	label: string;
@@ -99,15 +101,29 @@ function currentAssistantAskUserCallIds(ctx: ExtensionContext): string[] {
 		const entry = branch[index];
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 		return entry.message.content
-			.filter((part) => part.type === "toolCall" && part.name === "ask_user")
+			.filter((part): part is ToolCall => part.type === "toolCall" && part.name === "ask_user")
 			.map((part) => part.id);
 	}
 	return [];
 }
 
+// Without a UI there is nobody to answer, so ask_user is withheld for the whole
+// session. Expressed as a tool mode rather than a direct setActiveTools() call:
+// the coordinator owns the active set, and a direct call at session_start races
+// plan-mode and quarantine restore depending on extension load order.
+const NO_ASK_USER_MODE: ToolModeDefinition = {
+	id: "no-ask-user",
+	priority: 0,
+	apply: (toolNames) => toolNames.filter((name) => name !== "ask_user"),
+};
+
 export default function askUserExtension(pi: ExtensionAPI) {
-	pi.on("session_start", (_event, ctx) => {
-		if (!ctx.hasUI) {
+	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.hasUI) return;
+		// Not persisted: the mode is re-derived from ctx.hasUI on every session start
+		// rather than restored from session state.
+		const result = await setToolMode(pi.events, NO_ASK_USER_MODE, true);
+		if (result.status === "unavailable") {
 			pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "ask_user"));
 		}
 	});

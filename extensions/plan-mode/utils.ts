@@ -1,6 +1,11 @@
 /**
  * Pure utility functions for plan mode.
  * Extracted for testability.
+ *
+ * `isSafeCommand` is a best-effort guardrail, not a security control. It matches
+ * patterns against the raw command string: the deny list matches anywhere, the
+ * allow list only anchors the leading command. Chained, piped, and interpreter
+ * forms can pass it. Use quarantine when the restriction has to hold.
  */
 
 // Destructive commands blocked in plan mode

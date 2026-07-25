@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 // This mirrors Pi's built-in FooterComponent so the requested field changes do
@@ -52,48 +52,76 @@ function sanitizeStatus(text: string): string {
 	return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
 }
 
+interface SessionTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	/** Rate of the most recent assistant message, not the session average. */
+	latestCacheHitRate?: number;
+}
+
+function computeSessionTotals(sessionManager: ExtensionContext["sessionManager"]): SessionTotals {
+	const totals: SessionTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+	const addUsage = (usage: Usage) => {
+		totals.input += usage.input;
+		totals.output += usage.output;
+		totals.cacheRead += usage.cacheRead;
+		totals.cacheWrite += usage.cacheWrite;
+	};
+
+	for (const entry of sessionManager.getEntries()) {
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			const message = entry.message as AssistantMessage;
+			addUsage(message.usage);
+			const promptTokens =
+				message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+			totals.latestCacheHitRate =
+				promptTokens > 0 ? (message.usage.cacheRead / promptTokens) * 100 : undefined;
+		} else if (
+			entry.type === "message" &&
+			entry.message.role === "toolResult" &&
+			entry.message.usage
+		) {
+			addUsage(entry.message.usage);
+		} else if (
+			(entry.type === "branch_summary" || entry.type === "compaction") &&
+			entry.usage
+		) {
+			addUsage(entry.usage);
+		}
+	}
+
+	return totals;
+}
+
 export default function customFooterExtension(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
+		// render() runs on every keystroke, so walking the whole session each time makes
+		// typing latency grow with session length. Totals only change when the branch
+		// leaf advances, which is an O(1) check.
+		let cachedTotals: SessionTotals | undefined;
+		let cachedLeafId: string | null | undefined;
+		const sessionTotals = (): SessionTotals => {
+			const leafId = ctx.sessionManager.getLeafId();
+			if (cachedTotals && cachedLeafId === leafId) return cachedTotals;
+			cachedTotals = computeSessionTotals(ctx.sessionManager);
+			cachedLeafId = leafId;
+			return cachedTotals;
+		};
+
 		ctx.ui.setFooter((tui, theme, footerData) => ({
-			dispose: footerData.onBranchChange(() => tui.requestRender()),
+			dispose: footerData.onBranchChange(() => {
+				// A branch switch can land on the same leaf id with different entries.
+				cachedTotals = undefined;
+				tui.requestRender();
+			}),
 			invalidate() {},
 			render(width: number): string[] {
-				let input = 0;
-				let output = 0;
-				let cacheRead = 0;
-				let cacheWrite = 0;
-				let latestCacheHitRate: number | undefined;
-
-				const addUsage = (usage: Usage) => {
-					input += usage.input;
-					output += usage.output;
-					cacheRead += usage.cacheRead;
-					cacheWrite += usage.cacheWrite;
-				};
-
-				for (const entry of ctx.sessionManager.getEntries()) {
-					if (entry.type === "message" && entry.message.role === "assistant") {
-						const message = entry.message as AssistantMessage;
-						addUsage(message.usage);
-						const promptTokens =
-							message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
-						latestCacheHitRate =
-							promptTokens > 0 ? (message.usage.cacheRead / promptTokens) * 100 : undefined;
-					} else if (
-						entry.type === "message" &&
-						entry.message.role === "toolResult" &&
-						entry.message.usage
-					) {
-						addUsage(entry.message.usage);
-					} else if (
-						(entry.type === "branch_summary" || entry.type === "compaction") &&
-						entry.usage
-					) {
-						addUsage(entry.usage);
-					}
-				}
+				const { input, output, cacheRead, cacheWrite, latestCacheHitRate } = sessionTotals();
 
 				let cwd = abbreviatePath(
 					formatCwd(

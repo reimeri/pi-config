@@ -23,6 +23,8 @@ Each request includes the policy so extension load order does not matter. Only `
 
 Policies compose from lowest to highest priority. An absolute policy can ignore its input and return a fixed set. Quarantine uses priority 100 and an absolute policy, so it overrides plan mode at priority 10.
 
+The coordinator composes tool sets; it does not by itself make a mode enforceable. A mode that must actually hold — quarantine — additionally needs a default-deny `tool_call` gate, because tools can be invoked while in flight or activated by another extension between reconciliations. Plan mode deliberately has no such gate: it is a nudge toward planning, not a sandbox. See `plan-mode/README.md`.
+
 Use a baseline patch when disabling a mode must intentionally change normal access. Plan execution uses this to ensure `todo_update` is present:
 
 ```ts

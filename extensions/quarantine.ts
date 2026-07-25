@@ -23,7 +23,7 @@ interface QuarantineState {
 	restoredTools?: string[];
 }
 
-type LoadedState =
+export type LoadedState =
 	| { status: "none" }
 	| { status: "valid"; state: QuarantineState }
 	| { status: "invalid"; previousValid?: QuarantineState };
@@ -54,6 +54,21 @@ function parseState(value: unknown): QuarantineState | undefined {
 	};
 }
 
+// Quarantine can be enabled through its emergency direct path while the shared
+// coordinator is unavailable, in which case only the legacy entry records it.
+// Trusting the coordinator entry alone then silently drops quarantine on resume
+// whenever an older coordinator entry exists. Neither source is authoritative on
+// its own, so any source claiming quarantine is on wins.
+export function shouldRestoreEnabled(
+	loaded: LoadedState,
+	coordinatorState: { activeModeIds: string[] } | undefined,
+	legacyEnabled: boolean,
+): boolean {
+	if (loaded.status === "invalid") return true;
+	if (!coordinatorState) return legacyEnabled;
+	return coordinatorState.activeModeIds.includes("quarantine") || legacyEnabled;
+}
+
 export default function quarantineExtension(pi: ExtensionAPI): void {
 	let enabled = false;
 	let emergencyDirectMode = false;
@@ -62,9 +77,11 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 	function isAllowedBuiltin(toolName: string): boolean {
 		if (!READ_ONLY_TOOL_NAMES.has(toolName)) return false;
 
-		// Fail closed if a built-in has been replaced or its provenance is ambiguous.
-		const matchingTools = pi.getAllTools().filter((tool) => tool.name === toolName);
-		return matchingTools.length === 1 && matchingTools[0]?.sourceInfo.source === "builtin";
+		// Fail closed if a built-in has been replaced. Tool names are unique, so an
+		// extension registering "read" overwrites the built-in and its provenance
+		// stops reading as "builtin" — which is exactly what must not be allowed.
+		const matchingTool = pi.getAllTools().find((tool) => tool.name === toolName);
+		return matchingTool?.sourceInfo.source === "builtin";
 	}
 
 	function quarantineTools(): string[] {
@@ -264,12 +281,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 		}
 
 		const coordinatorState = persistedToolModeState(ctx);
-		const restoredEnabled =
-			loaded.status === "invalid"
-				? true
-				: coordinatorState
-					? coordinatorState.activeModeIds.includes("quarantine")
-					: enabled;
+		const restoredEnabled = shouldRestoreEnabled(loaded, coordinatorState, enabled);
 		enabled = restoredEnabled;
 		await setQuarantineTools(restoredEnabled, ctx, {
 			baselineSeed: coordinatorState?.baselineTools ?? persistedToolModeBaseline(ctx),
@@ -297,9 +309,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 		}
 
 		const coordinatorState = persistedToolModeState(ctx);
-		if (loaded.status !== "invalid" && coordinatorState) {
-			restoredEnabled = coordinatorState.activeModeIds.includes("quarantine");
-		}
+		restoredEnabled = shouldRestoreEnabled(loaded, coordinatorState, restoredEnabled);
 		const result = await setQuarantineTools(restoredEnabled, ctx, {
 			baselineSeed: coordinatorState?.baselineTools ?? persistedToolModeBaseline(ctx),
 		});
