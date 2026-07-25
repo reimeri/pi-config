@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { shouldRestoreEnabled, type LoadedState } from "./quarantine.ts";
+import { shouldRestoreEnabled, type LoadedState } from "./index.ts";
 
 const enabledState: LoadedState = {
 	status: "valid",

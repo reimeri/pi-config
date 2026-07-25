@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { setEditorTopBarMode } from "./shared/editor-top-bar.ts";
+import { setEditorTopBarMode } from "../shared/editor-top-bar.ts";
 import {
 	LOCAL_TOOL_MODE_STATUS_EVENT,
 	persistedToolModeBaseline,
@@ -8,7 +8,7 @@ import {
 	type SetToolModeOptions,
 	type ToolModeDefinition,
 	type ToolModeResult,
-} from "./tool-modes/protocol.ts";
+} from "../tool-modes/protocol.ts";
 
 const STATE_ENTRY_TYPE = "quarantine-state";
 const STATUS_ID = "quarantine";
