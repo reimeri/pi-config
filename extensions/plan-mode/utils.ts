@@ -110,18 +110,77 @@ export function cleanPlanStepText(text: string): string {
 	return cleaned.length > 300 ? `${cleaned.slice(0, 297)}...` : cleaned;
 }
 
+const PLAN_HEADER_PATTERN =
+	/^[ \t]{0,3}(?:#{1,6}[ \t]+)?(?:\*{1,2})?Plan:(?:\*{1,2})?(?:[ \t]+#{1,})?[ \t]*\r?$/i;
+const FENCE_OPEN_PATTERN = /^[ \t]{0,3}(`{3,}|~{3,})/;
+
+function stripMarkdownBlockQuotePrefix(line: string): string {
+	let remainder = line;
+	while (true) {
+		const withoutQuote = remainder.replace(/^[ \t]{0,3}>[ \t]?/, "");
+		if (withoutQuote === remainder) return remainder;
+		remainder = withoutQuote;
+	}
+}
+
+function stripMarkdownContainerPrefix(line: string): string {
+	let remainder = line;
+	while (true) {
+		const withoutQuote = stripMarkdownBlockQuotePrefix(remainder);
+		if (withoutQuote !== remainder) {
+			remainder = withoutQuote;
+			continue;
+		}
+		const withoutListItem = remainder.replace(/^[ \t]{0,3}(?:[-+*]|\d+[.)])[ \t]+/, "");
+		if (withoutListItem !== remainder) {
+			remainder = withoutListItem;
+			continue;
+		}
+		return remainder;
+	}
+}
+
+function findPlanSectionStart(message: string): number | undefined {
+	let activeFence: { marker: "`" | "~"; length: number; maxClosingIndent: number } | undefined;
+	let offset = 0;
+
+	for (const line of message.split("\n")) {
+		const lineWithoutQuotes = stripMarkdownBlockQuotePrefix(line);
+		if (activeFence) {
+			const closingFence = new RegExp(
+				`^[ \\t]{0,${activeFence.maxClosingIndent}}${activeFence.marker}{${activeFence.length},}[ \\t]*\\r?$`,
+			);
+			if (closingFence.test(lineWithoutQuotes)) activeFence = undefined;
+		} else {
+			const openingFence = FENCE_OPEN_PATTERN.exec(stripMarkdownContainerPrefix(line));
+			if (openingFence?.[1]) {
+				const fenceColumn = lineWithoutQuotes.indexOf(openingFence[1]);
+				activeFence = {
+					marker: openingFence[1][0] as "`" | "~",
+					length: openingFence[1].length,
+					maxClosingIndent: Math.max(3, fenceColumn + 3),
+				};
+			} else if (PLAN_HEADER_PATTERN.test(line)) {
+				return offset + line.length;
+			}
+		}
+		offset += line.length + 1;
+	}
+	return undefined;
+}
+
 export function extractPlanSteps(message: string): PlanStep[] {
 	const items: PlanStep[] = [];
-	const headerMatch = message.match(/\*{0,2}Plan:\*{0,2}\s*\n/i);
-	if (!headerMatch) return items;
+	const planSectionStart = findPlanSectionStart(message);
+	if (planSectionStart === undefined) return items;
 
-	const planSection = message.slice(message.indexOf(headerMatch[0]) + headerMatch[0].length);
+	const planSection = message.slice(planSectionStart);
 	let currentParts: string[] | undefined;
 
 	const appendCurrentStep = (): void => {
 		if (!currentParts) return;
 		const text = cleanPlanStepText(currentParts.join(" "));
-		if (text.length > 3) items.push({ step: items.length + 1, text });
+		if (text.length > 0) items.push({ step: items.length + 1, text });
 		currentParts = undefined;
 	};
 
@@ -132,20 +191,15 @@ export function extractPlanSteps(message: string): PlanStep[] {
 			currentParts = [numbered[1].trim()];
 			continue;
 		}
-		if (!currentParts) {
-			if (items.length > 0 && line.trim() === "") break;
-			continue;
-		}
-		if (line.trim() === "") {
-			appendCurrentStep();
-			break;
-		}
-		if (/^\s+\S/.test(line)) {
+		if (line.trim() === "") continue;
+		if (currentParts && /^\s+\S/.test(line)) {
 			currentParts.push(line.trim());
 			continue;
 		}
-		appendCurrentStep();
-		break;
+		if (currentParts || items.length > 0) {
+			appendCurrentStep();
+			break;
+		}
 	}
 	appendCurrentStep();
 	return items;

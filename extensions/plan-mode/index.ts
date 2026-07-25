@@ -31,7 +31,7 @@ import { extractPlanSteps, isSafeCommand } from "./utils.ts";
 // Tools
 const TODO_TOOL_NAME = "todo_update";
 const PLAN_MODE_STATE_VERSION = 2;
-const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
+const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["edit", "write", TODO_TOOL_NAME]);
 const PLAN_MODE_PRIORITY = 10;
 
@@ -67,6 +67,7 @@ function getTextContent(message: AssistantMessage): string {
 
 export default function planModeExtension(pi: ExtensionAPI): void {
 	let planModeEnabled = false;
+	let planModeCanAskUser = false;
 	let toolsBeforePlanMode: string[] | undefined;
 
 	pi.registerFlag("plan", {
@@ -90,9 +91,13 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	}
 
 	function getPlanModeTools(activeToolNames: string[]): string[] {
+		const clarificationTools = planModeCanAskUser ? ["ask_user"] : [];
 		return uniqueToolNames([
-			...activeToolNames.filter((name) => !PLAN_MODE_DISABLED_TOOLS.has(name)),
+			...activeToolNames.filter(
+				(name) => !PLAN_MODE_DISABLED_TOOLS.has(name) && (planModeCanAskUser || name !== "ask_user"),
+			),
 			...PLAN_MODE_TOOLS,
+			...clarificationTools,
 		]);
 	}
 
@@ -107,6 +112,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		ctx: ExtensionContext,
 		options?: SetToolModeOptions,
 	): Promise<boolean> {
+		planModeCanAskUser = ctx.hasUI && pi.getAllTools().some((tool) => tool.name === "ask_user");
 		const result = await setToolMode(pi.events, toolModeDefinition, nextEnabled, options);
 		if (result.status === "unavailable") {
 			ctx.ui.notify(`Could not update plan mode tools: ${result.message}`, "error");
@@ -178,8 +184,13 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	// Filter stale context from the previous progress-tracking implementation.
 	pi.on("context", async (event) => {
+		const latestPlanContextIndex = planModeEnabled
+			? event.messages.findLastIndex(
+					(message) => (message as AgentMessage & { customType?: string }).customType === "plan-mode-context",
+				)
+			: -1;
 		return {
-			messages: event.messages.filter((m) => {
+			messages: event.messages.filter((m, index) => {
 				const msg = m as AgentMessage & { customType?: string };
 				if (
 					msg.customType === "plan-execution-context" ||
@@ -189,8 +200,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				) {
 					return false;
 				}
+				if (msg.customType === "plan-mode-context") return index === latestPlanContextIndex;
 				if (planModeEnabled) return true;
-				if (msg.customType === "plan-mode-context") return false;
 				if (msg.role !== "user") return true;
 
 				const content = msg.content;
@@ -210,6 +221,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	// Inject plan context before the agent starts.
 	pi.on("before_agent_start", async () => {
 		if (!planModeEnabled) return;
+		const clarificationGuidance = planModeCanAskUser
+			? "Ask clarifying questions using the ask_user tool."
+			: "If material ambiguities remain, report them instead of assuming answers.";
 		return {
 			message: {
 				customType: "plan-mode-context",
@@ -221,7 +235,7 @@ Restrictions:
 - Other currently active tools remain available
 - Bash is restricted to an allowlist of read-only commands
 
-Ask clarifying questions using the questionnaire tool.
+${clarificationGuidance}
 Use brave-search skill via bash for web research.
 
 Create a detailed numbered plan under a "Plan:" header:
