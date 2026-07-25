@@ -16,6 +16,15 @@ import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { setEditorTopBarMode } from "../shared/editor-top-bar.ts";
+import {
+	locallyActiveToolModes,
+	persistedToolModeBaseline,
+	persistedToolModeState,
+	reconcileToolModes,
+	setToolMode,
+	type SetToolModeOptions,
+	type ToolModeDefinition,
+} from "../tool-modes/protocol.ts";
 import { MAX_TODOS, requestTodosFromPlan } from "../todos/protocol.ts";
 import { extractPlanSteps, isSafeCommand } from "./utils.ts";
 
@@ -23,9 +32,8 @@ import { extractPlanSteps, isSafeCommand } from "./utils.ts";
 const TODO_TOOL_NAME = "todo_update";
 const PLAN_MODE_STATE_VERSION = 2;
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
-const NORMAL_MODE_TOOLS = ["read", "bash", "edit", "write", TODO_TOOL_NAME];
 const PLAN_MODE_DISABLED_TOOLS = new Set<string>(["edit", "write", TODO_TOOL_NAME]);
-const PLAN_MANAGED_TOOLS = new Set<string>([...PLAN_MODE_TOOLS, ...NORMAL_MODE_TOOLS]);
+const PLAN_MODE_PRIORITY = 10;
 
 interface PlanModeState {
 	version: typeof PLAN_MODE_STATE_VERSION;
@@ -88,58 +96,71 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		]);
 	}
 
-	function getNormalModeTools(activeToolNames: string[]): string[] {
-		return uniqueToolNames([
-			...NORMAL_MODE_TOOLS,
-			...activeToolNames.filter((name) => !PLAN_MANAGED_TOOLS.has(name)),
-		]);
-	}
+	const toolModeDefinition: ToolModeDefinition = {
+		id: "plan",
+		priority: PLAN_MODE_PRIORITY,
+		apply: getPlanModeTools,
+	};
 
-	function enablePlanModeTools(captureCurrentTools = false): void {
-		if (captureCurrentTools || toolsBeforePlanMode === undefined) {
-			toolsBeforePlanMode = pi.getActiveTools();
+	async function setPlanModeTools(
+		nextEnabled: boolean,
+		ctx: ExtensionContext,
+		options?: SetToolModeOptions,
+	): Promise<boolean> {
+		const result = await setToolMode(pi.events, toolModeDefinition, nextEnabled, options);
+		if (result.status === "unavailable") {
+			ctx.ui.notify(`Could not update plan mode tools: ${result.message}`, "error");
+			return false;
 		}
-		pi.setActiveTools(getPlanModeTools(toolsBeforePlanMode));
+		if (result.baselineTools !== undefined) {
+			toolsBeforePlanMode = [...result.baselineTools];
+		}
+		return true;
 	}
 
-	function restoreNormalModeTools(requireTodoUpdate = false): void {
-		const restoredTools = toolsBeforePlanMode ?? getNormalModeTools(pi.getActiveTools());
-		toolsBeforePlanMode = requireTodoUpdate
-			? uniqueToolNames([...restoredTools, TODO_TOOL_NAME])
-			: restoredTools;
-		pi.setActiveTools(toolsBeforePlanMode);
+	function persistState(ctx: ExtensionContext): void {
+		try {
+			// Kept for backward compatibility. The coordinator entry is the
+			// canonical state for coordinated mode restoration.
+			pi.appendEntry("plan-mode", {
+				version: PLAN_MODE_STATE_VERSION,
+				enabled: planModeEnabled,
+				toolsBeforePlanMode,
+			});
+		} catch (error) {
+			ctx.ui.notify(
+				`Plan mode changed, but its legacy state entry could not be written: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			);
+		}
 	}
 
-	function persistState(): void {
-		pi.appendEntry("plan-mode", {
-			version: PLAN_MODE_STATE_VERSION,
-			enabled: planModeEnabled,
-			toolsBeforePlanMode,
-		});
-	}
-
-	function togglePlanMode(ctx: ExtensionContext): void {
-		planModeEnabled = !planModeEnabled;
+	async function togglePlanMode(ctx: ExtensionContext): Promise<void> {
+		const nextEnabled = !planModeEnabled;
+		if (!(await setPlanModeTools(nextEnabled, ctx, { persist: true }))) return;
+		planModeEnabled = nextEnabled;
 
 		if (planModeEnabled) {
-			enablePlanModeTools(true);
 			ctx.ui.notify("Plan mode enabled. Write and TODO update tools disabled.");
 		} else {
-			restoreNormalModeTools();
-			ctx.ui.notify("Plan mode disabled. Full access restored.");
+			ctx.ui.notify("Plan mode disabled. Remaining tool-mode policies applied.");
 		}
 		updateModeIndicator(ctx);
-		persistState();
+		persistState(ctx);
 	}
 
 	pi.registerCommand("plan", {
 		description: "Toggle plan mode (read-only exploration)",
-		handler: async (_args, ctx) => togglePlanMode(ctx),
+		handler: async (_args, ctx) => {
+			await togglePlanMode(ctx);
+		},
 	});
 
 	pi.registerShortcut(Key.ctrlAlt("p"), {
 		description: "Toggle plan mode",
-		handler: async (ctx) => togglePlanMode(ctx),
+		handler: async (ctx) => {
+			await togglePlanMode(ctx);
+		},
 	});
 
 	// Block destructive bash commands in plan mode
@@ -248,6 +269,19 @@ Do NOT attempt to make changes - just describe what you would do.`,
 			const firstPlanStep = planSteps[0];
 			if (!firstPlanStep) return;
 
+			const modeState = await reconcileToolModes(pi.events);
+			if (modeState.status === "unavailable") {
+				ctx.ui.notify(`Cannot execute plan: ${modeState.message}`, "error");
+				return;
+			}
+			if (
+				modeState.activeModeIds.includes("quarantine") ||
+				locallyActiveToolModes(pi.events).includes("quarantine")
+			) {
+				ctx.ui.notify("Cannot execute plan while quarantine is enabled. Disable quarantine first.", "warning");
+				return;
+			}
+
 			const replacement = await requestTodosFromPlan(
 				pi.events,
 				planSteps.map((step) => step.text),
@@ -262,10 +296,17 @@ Do NOT attempt to make changes - just describe what you would do.`,
 				return;
 			}
 
+			if (
+				!(await setPlanModeTools(false, ctx, {
+					baselinePatch: { add: [TODO_TOOL_NAME] },
+					persist: true,
+				}))
+			) {
+				return;
+			}
 			planModeEnabled = false;
-			restoreNormalModeTools(true);
 			updateModeIndicator(ctx);
-			persistState();
+			persistState(ctx);
 
 			const remainingList = planSteps.map((step) => `${step.step}. ${step.text}`).join("\n");
 			const execMessage = `Execute the approved plan.
@@ -289,8 +330,7 @@ Use todo_update as the canonical progress tracker. Mark each item completed only
 		}
 	});
 
-	function restoreState(ctx: ExtensionContext, defaultEnabled: boolean): void {
-		const wasPlanModeEnabled = planModeEnabled;
+	async function restoreState(ctx: ExtensionContext, defaultEnabled: boolean): Promise<void> {
 		const planModeEntry = ctx.sessionManager
 			.getBranch()
 			.filter((entry) => entry.type === "custom" && entry.customType === "plan-mode")
@@ -298,23 +338,28 @@ Use todo_update as the canonical progress tracker. Mark each item completed only
 		const knownTools = new Set(pi.getAllTools().map((tool) => tool.name));
 		const state = planModeEntry?.type === "custom" ? parsePlanModeState(planModeEntry.data, knownTools) : undefined;
 
-		planModeEnabled = state?.enabled ?? defaultEnabled;
+		const coordinatorState = persistedToolModeState(ctx);
+		const restoredEnabled = coordinatorState
+			? coordinatorState.activeModeIds.includes("plan")
+			: state?.enabled ?? defaultEnabled;
 		if (state?.toolsBeforePlanMode !== undefined) {
 			toolsBeforePlanMode = state.toolsBeforePlanMode;
 		}
-		if (planModeEnabled) {
-			enablePlanModeTools();
-		} else if (state?.toolsBeforePlanMode !== undefined || wasPlanModeEnabled) {
-			restoreNormalModeTools();
+		if (
+			await setPlanModeTools(restoredEnabled, ctx, {
+				baselineSeed: coordinatorState?.baselineTools ?? persistedToolModeBaseline(ctx),
+			})
+		) {
+			planModeEnabled = restoredEnabled;
 		}
 		updateModeIndicator(ctx);
 	}
 
 	// Restore branch-aware plan-mode state on session start/resume and tree navigation.
 	pi.on("session_start", async (_event, ctx) => {
-		restoreState(ctx, pi.getFlag("plan") === true);
+		await restoreState(ctx, pi.getFlag("plan") === true);
 	});
 	pi.on("session_tree", async (_event, ctx) => {
-		restoreState(ctx, false);
+		await restoreState(ctx, false);
 	});
 }

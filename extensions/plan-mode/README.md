@@ -9,6 +9,7 @@ Read-only exploration mode for safe code analysis.
 - **Plan extraction**: Extracts numbered steps from `Plan:` sections
 - **TODO handoff**: Creates the canonical execution list in the todos extension
 - **Session persistence**: Plan-mode state survives session resume
+- **Mode composition**: Shares a coordinated baseline with quarantine and future tool modes
 
 ## Commands
 
@@ -39,7 +40,8 @@ If unfinished TODOs already exist, the todos extension asks before replacing the
 ### Plan Mode (Read-Only)
 
 - Built-in edit/write and `todo_update` are disabled
-- Other active tools remain available
+- Other baseline tools remain available
+- Tool access is composed by the shared tool-mode coordinator; higher-priority modes such as quarantine remain authoritative
 - Bash commands are filtered through an allowlist
 - The agent creates a plan without making changes
 
