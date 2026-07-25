@@ -5,6 +5,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type EditorTheme, truncateToWidth, type TUI, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+	EDITOR_TOP_BAR_MODE_EVENT,
+	type EditorTopBarMode,
+	type EditorTopBarModeUpdate,
+} from "./shared/editor-top-bar.ts";
 
 const MAX_TASK_LENGTH = 200;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
@@ -17,18 +22,62 @@ function taskLength(value: string): number {
 	return Array.from(value).length;
 }
 
-function taskBorder(
+function modesForWidth(modes: EditorTopBarMode[], width: number): string {
+	if (modes.length === 0 || width <= 0) return "";
+
+	const full = ` ${modes.map((mode) => mode.label).join("  ")} `;
+	if (visibleWidth(full) <= width) return full;
+
+	const compact = ` ${modes.map((mode) => mode.compactLabel).join(" ")} `;
+	if (visibleWidth(compact) <= width) return compact;
+
+	const selected = new Set<string>();
+	for (const mode of [...modes].sort((left, right) => right.priority - left.priority)) {
+		const candidate = modes
+			.filter((item) => selected.has(item.id) || item.id === mode.id)
+			.map((item) => item.compactLabel)
+			.join(" ");
+		if (visibleWidth(candidate) <= width) selected.add(mode.id);
+	}
+
+	const selectedText = modes
+		.filter((mode) => selected.has(mode.id))
+		.map((mode) => mode.compactLabel)
+		.join(" ");
+	if (selectedText) return selectedText;
+
+	const highestPriority = [...modes].sort((left, right) => right.priority - left.priority)[0];
+	return highestPriority ? truncateToWidth(highestPriority.compactLabel, width, "") : "";
+}
+
+function editorTopBar(
 	task: string,
+	modes: EditorTopBarMode[],
 	width: number,
 	border: (text: string) => string,
 	accent: (text: string) => string,
+	warning: (text: string) => string,
 ): string {
 	if (width <= 0) return "";
 	if (width === 1) return border("─");
 
-	const label = truncateToWidth(` Task: ${task} `, Math.max(0, width - 2), "…");
-	const fillWidth = Math.max(1, width - 1 - visibleWidth(label));
-	return `${border("─")}${accent(label)}${border("─".repeat(fillWidth))}`;
+	const innerWidth = width - 2;
+	const modeText = modesForWidth(modes, innerWidth);
+	const modeWidth = visibleWidth(modeText);
+	const taskWidth = Math.max(0, innerWidth - modeWidth - (modeText ? 1 : 0));
+	const taskText = task
+		? truncateToWidth(` Task: ${task} `, taskWidth, taskWidth > 0 ? "…" : "")
+		: "";
+	const taskTextWidth = visibleWidth(taskText);
+	const fillWidth = Math.max(0, innerWidth - taskTextWidth - modeWidth);
+
+	return [
+		border("─"),
+		taskText ? accent(taskText) : "",
+		border("─".repeat(fillWidth)),
+		modeText ? warning(modeText) : "",
+		border("─"),
+	].join("");
 }
 
 class CurrentTaskEditor extends CustomEditor {
@@ -37,7 +86,9 @@ class CurrentTaskEditor extends CustomEditor {
 		theme: EditorTheme,
 		keybindings: KeybindingsManager,
 		private readonly getTask: () => string | undefined,
+		private readonly getModes: () => EditorTopBarMode[],
 		private readonly accent: (text: string) => string,
+		private readonly warning: (text: string) => string,
 	) {
 		super(tui, theme, keybindings);
 	}
@@ -45,17 +96,44 @@ class CurrentTaskEditor extends CustomEditor {
 	render(width: number): string[] {
 		const lines = super.render(width);
 		const task = normalizeTask(this.getTask() ?? "");
-		if (!task || lines.length === 0) return lines;
+		const modes = this.getModes();
+		if ((!task && modes.length === 0) || lines.length === 0) return lines;
 
-		lines[0] = taskBorder(task, width, (text) => this.borderColor(text), this.accent);
+		lines[0] = editorTopBar(
+			task,
+			modes,
+			width,
+			(text) => this.borderColor(text),
+			this.accent,
+			this.warning,
+		);
 		return lines;
 	}
 }
 
 export default function currentTaskExtension(pi: ExtensionAPI) {
 	let activeTui: TUI | undefined;
+	const activeModes = new Map<string, EditorTopBarMode>();
 
 	const requestRender = () => activeTui?.requestRender();
+
+	const disposeModeListener = pi.events.on(EDITOR_TOP_BAR_MODE_EVENT, (data) => {
+		const update = data as EditorTopBarModeUpdate;
+		if (!update || typeof update.id !== "string") return;
+		if (typeof update.label === "string" && update.label.trim()) {
+			const label = normalizeTask(update.label);
+			const compactLabel = normalizeTask(update.compactLabel ?? label);
+			activeModes.set(update.id, {
+				id: update.id,
+				label,
+				compactLabel: compactLabel || label,
+				priority: Number.isFinite(update.priority) ? (update.priority ?? 0) : 0,
+			});
+		} else {
+			activeModes.delete(update.id);
+		}
+		requestRender();
+	});
 
 	const setTask = (value: string): string => {
 		const task = normalizeTask(value);
@@ -122,6 +200,9 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	const getActiveModes = (): EditorTopBarMode[] =>
+		[...activeModes.values()].sort((left, right) => left.id.localeCompare(right.id));
+
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
@@ -131,7 +212,9 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 				theme,
 				keybindings,
 				() => pi.getSessionName(),
+				getActiveModes,
 				(text) => ctx.ui.theme.fg("accent", text),
+				(text) => ctx.ui.theme.fg("warning", text),
 			);
 		});
 	});
@@ -139,6 +222,8 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 	pi.on("session_info_changed", requestRender);
 
 	pi.on("session_shutdown", () => {
+		disposeModeListener();
+		activeModes.clear();
 		activeTui = undefined;
 	});
 }

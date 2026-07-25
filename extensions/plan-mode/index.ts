@@ -15,6 +15,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
+import { setEditorTopBarMode } from "../shared/editor-top-bar.ts";
 import { MAX_TODOS, requestTodosFromPlan } from "../todos/protocol.ts";
 import { extractPlanSteps, isSafeCommand } from "./utils.ts";
 
@@ -66,11 +67,13 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		default: false,
 	});
 
-	function updateStatus(ctx: ExtensionContext): void {
-		ctx.ui.setStatus(
-			"plan-mode",
-			planModeEnabled ? ctx.ui.theme.fg("warning", "⏸ plan") : undefined,
-		);
+	function updateModeIndicator(ctx: ExtensionContext): void {
+		// Clear footer state left by older versions that rendered modes there.
+		ctx.ui.setStatus("plan-mode", undefined);
+		setEditorTopBarMode(pi, "plan-mode", planModeEnabled ? "⏸ plan" : undefined, {
+			compactLabel: "⏸",
+			priority: 10,
+		});
 	}
 
 	function uniqueToolNames(toolNames: string[]): string[] {
@@ -124,7 +127,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 			restoreNormalModeTools();
 			ctx.ui.notify("Plan mode disabled. Full access restored.");
 		}
-		updateStatus(ctx);
+		updateModeIndicator(ctx);
 		persistState();
 	}
 
@@ -260,7 +263,7 @@ Do NOT attempt to make changes - just describe what you would do.`,
 
 			planModeEnabled = false;
 			restoreNormalModeTools(true);
-			updateStatus(ctx);
+			updateModeIndicator(ctx);
 			persistState();
 
 			const remainingList = planSteps.map((step) => `${step.step}. ${step.text}`).join("\n");
@@ -303,7 +306,7 @@ Use todo_update as the canonical progress tracker. Mark each item completed only
 		} else if (state?.toolsBeforePlanMode !== undefined || wasPlanModeEnabled) {
 			restoreNormalModeTools();
 		}
-		updateStatus(ctx);
+		updateModeIndicator(ctx);
 	}
 
 	// Restore branch-aware plan-mode state on session start/resume and tree navigation.

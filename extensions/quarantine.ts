@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { setEditorTopBarMode } from "./shared/editor-top-bar.ts";
 
 const STATE_ENTRY_TYPE = "quarantine-state";
 const STATUS_ID = "quarantine";
@@ -70,11 +71,13 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 		return toolNames.filter((name) => !restored.has(name));
 	}
 
-	function updateStatus(ctx: ExtensionContext): void {
-		ctx.ui.setStatus(
-			STATUS_ID,
-			enabled ? ctx.ui.theme.fg("warning", "🔒 quarantine") : undefined,
-		);
+	function updateModeIndicator(ctx: ExtensionContext): void {
+		// Clear footer state left by older versions that rendered modes there.
+		ctx.ui.setStatus(STATUS_ID, undefined);
+		setEditorTopBarMode(pi, STATUS_ID, enabled ? "🔒 quarantine" : undefined, {
+			compactLabel: "🔒",
+			priority: 100,
+		});
 	}
 
 	function persistState(state: QuarantineState): void {
@@ -109,7 +112,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 		enabled = true;
 		enforceQuarantine();
 		persistState({ version: 1, enabled: true, toolsBeforeQuarantine: [...toolsBeforeQuarantine] });
-		updateStatus(ctx);
+		updateModeIndicator(ctx);
 		ctx.ui.notify(
 			"Quarantine enabled. Only built-in read, grep, find, and ls tools are allowed.",
 			"warning",
@@ -124,7 +127,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 		enabled = false;
 		toolsBeforeQuarantine = undefined;
 		persistState({ version: 1, enabled: false, restoredTools });
-		updateStatus(ctx);
+		updateModeIndicator(ctx);
 		if (unavailableTools.length > 0) {
 			ctx.ui.notify(
 				`Quarantine disabled, but these previous tools are no longer available: ${unavailableTools.join(", ")}`,
@@ -189,7 +192,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 		}
 
 		if (enabled) enforceQuarantine();
-		updateStatus(ctx);
+		updateModeIndicator(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
@@ -223,7 +226,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 				);
 			}
 		}
-		updateStatus(ctx);
+		updateModeIndicator(ctx);
 	});
 
 	// Session replacement may carry the process-level active tool set forward.
