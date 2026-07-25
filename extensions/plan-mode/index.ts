@@ -70,8 +70,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	function updateModeIndicator(ctx: ExtensionContext): void {
 		// Clear footer state left by older versions that rendered modes there.
 		ctx.ui.setStatus("plan-mode", undefined);
-		setEditorTopBarMode(pi, "plan-mode", planModeEnabled ? "⏸ plan" : undefined, {
-			compactLabel: "⏸",
+		setEditorTopBarMode(pi, "plan-mode", planModeEnabled ? "⏸️ plan" : undefined, {
+			compactLabel: "⏸️",
 			priority: 10,
 		});
 	}
