@@ -338,8 +338,16 @@ Use todo_update as the canonical progress tracker. Mark each item completed only
 		} else if (choice === "Refine the plan") {
 			const refinement = await ctx.ui.editor("Refine the plan:", "");
 			if (refinement?.trim()) {
-				pi.sendMessage(planStepListMessage, { deliverAs: "followUp" });
-				pi.sendUserMessage(refinement.trim(), { deliverAs: "followUp" });
+				const currentPlan = planSteps.map((step) => `${step.step}. ${step.text}`).join("\n");
+				const refinementPrompt = `Refine the current plan according to this request:
+
+${refinement.trim()}
+
+Current plan:
+${currentPlan}
+
+Return the complete revised plan under a "Plan:" header. Do not implement it.`;
+				pi.sendUserMessage(refinementPrompt, { deliverAs: "followUp" });
 			}
 		}
 	});
