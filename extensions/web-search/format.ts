@@ -4,6 +4,7 @@ import {
 	truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { markdownLink } from "./safety.ts";
+import { webSearchContext } from "./temporal.ts";
 import type { Citation, ProviderResult, Source, ToolDetails } from "./types.ts";
 
 function sourceKey(source: Source): string {
@@ -102,7 +103,7 @@ function applyTextCitations(text: string, citations: Citation[], sources: Source
 	return output;
 }
 
-export function formatProviderResult(result: ProviderResult, modelId: string): { text: string; details: ToolDetails } {
+export function formatProviderResult(result: ProviderResult, modelId: string, searchedAt?: string): { text: string; details: ToolDetails } {
 	const sources = deriveSources(result);
 	let answer = applyUtf16Citations(result.text, result.citations, sources);
 	answer = applyUtf8Citations(answer, result.citations, sources);
@@ -125,7 +126,8 @@ export function formatProviderResult(result: ProviderResult, modelId: string): {
 	const notices: string[] = [];
 	if (body.truncated) notices.push("[Answer truncated; complete normalized citations remain in tool details.]");
 	if (suffix.truncated) notices.push("[Source/status list truncated; complete normalized entries remain in tool details.]");
-	const sections = [body.content, suffix.content, ...notices].filter(Boolean);
+	const temporalContext = searchedAt ? webSearchContext(searchedAt) : "";
+	const sections = [temporalContext, body.content, suffix.content, ...notices].filter(Boolean);
 	const text = sections.join("\n\n");
 	const final = truncateHead(text, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
 	return {
@@ -133,6 +135,7 @@ export function formatProviderResult(result: ProviderResult, modelId: string): {
 		details: {
 			provider: result.provider,
 			model: modelId,
+			searchedAt,
 			searchUsed: result.searchUsed,
 			grounded: sources.length > 0,
 			sources,

@@ -52,6 +52,7 @@ export interface ProviderResult {
 export interface ToolDetails {
 	provider?: SearchProvider;
 	model?: string;
+	searchedAt?: string;
 	searchUsed?: boolean;
 	grounded: boolean;
 	sources: Source[];

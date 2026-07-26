@@ -2,6 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { callProvider, providerKind } from "./providers.ts";
 
 const originalFetch = globalThis.fetch;
+const SEARCHED_AT = "2026-07-26T18:30:00.000Z";
+const OPENAI_CODEX_TOKEN = [
+	"eyJhbGciOiJub25lIn0",
+	"eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF90ZXN0In19",
+	"signature",
+].join(".");
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 function model(overrides: Record<string, unknown>) {
@@ -50,6 +56,8 @@ describe("provider adapters", () => {
 			expect(url).toBe("https://api.example.test/v1/responses");
 			expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-key");
 			const body = JSON.parse(String(init?.body));
+			expect(body.input).toContain(`Current date and time: ${SEARCHED_AT} (UTC)`);
+			expect(body.input).toContain("do not loop on persistently ungrounded results");
 			expect(body.tools).toEqual([{ type: "web_search" }]);
 			expect(body.include).toEqual(["web_search_call.action.sources", "web_search_call.results"]);
 			return sse([
@@ -60,7 +68,7 @@ describe("provider adapters", () => {
 				{ type: "response.completed", response: { output: [] } },
 			]);
 		};
-		const result = await callProvider(context(), model({}), { query: "docs", urls: [] });
+		const result = await callProvider(context(), model({}), { query: "docs", urls: [], searchedAt: SEARCHED_AT });
 		expect(result.text).toBe("Read docs");
 		expect(result.searchUsed).toBe(true);
 		expect(result.queries).toEqual(["docs"]);
@@ -68,6 +76,28 @@ describe("provider adapters", () => {
 		expect(result.results.some((item) => item.title === "API Guide" && item.url === "https://example.com/guide" && item.source === "openai.web_search.results")).toBe(true);
 		expect(result.citations[0]?.indexEncoding).toBe("utf16");
 		expect(JSON.stringify(result)).not.toContain("utm_source");
+	});
+
+	test("propagates temporal context through OpenAI Codex input", async () => {
+		globalThis.fetch = async (url, init) => {
+			expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
+			const headers = new Headers(init?.headers);
+			expect(headers.get("chatgpt-account-id")).toBe("acct_test");
+			const body = JSON.parse(String(init?.body));
+			const prompt = body.input[0].content[0].text;
+			expect(prompt).toContain(`Current date and time: ${SEARCHED_AT} (UTC)`);
+			expect(prompt).toContain("Do not repeat a grounded search solely because");
+			return sse([
+				{ type: "response.output_text.delta", delta: "Recent Codex answer" },
+				{ type: "response.done", response: { output: [] } },
+			]);
+		};
+		const result = await callProvider(
+			context(OPENAI_CODEX_TOKEN),
+			model({ id: "gpt-5.5", provider: "openai-codex", api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api", reasoning: true }),
+			{ query: "recent news", urls: [], searchedAt: SEARCHED_AT },
+		);
+		expect(result.text).toBe("Recent Codex answer");
 	});
 
 	test("preserves OpenAI api-key header authentication without adding Bearer auth", async () => {
@@ -113,6 +143,8 @@ describe("provider adapters", () => {
 		globalThis.fetch = async (_url, init) => {
 			const headers = new Headers(init?.headers);
 			expect(headers.get("authorization")).toBe("Bearer sk-ant-oat-test");
+			const body = JSON.parse(String(init?.body));
+			expect(body.messages[0].content).toContain(`Current date and time: ${SEARCHED_AT} (UTC)`);
 			expect(headers.get("anthropic-beta")).toContain("claude-code-20250219");
 			expect(headers.get("user-agent")).toBe("claude-cli/2.1.75");
 			expect(headers.get("x-app")).toBe("cli");
@@ -122,9 +154,22 @@ describe("provider adapters", () => {
 				{ type: "content_block_delta", delta: { type: "text_delta", text: "News answer" } },
 			]);
 		};
-		const result = await callProvider(context("sk-ant-oat-test"), model({ api: "anthropic-messages", maxTokens: 12_000 }), { query: "news", urls: [] });
+		const result = await callProvider(context("sk-ant-oat-test"), model({ api: "anthropic-messages", maxTokens: 12_000 }), { query: "news", urls: [], searchedAt: SEARCHED_AT });
 		expect(result.text).toBe("News answer");
 		expect(result.results[0]?.title).toBe("News");
+	});
+
+	test("propagates temporal context through Google search contents", async () => {
+		globalThis.fetch = async (_url, init) => {
+			const body = JSON.parse(String(init?.body));
+			const prompt = body.contents[0].parts[0].text;
+			expect(prompt).toContain(`Current date and time: ${SEARCHED_AT} (UTC)`);
+			expect(prompt).toContain("Do not repeat a grounded search solely because");
+			expect(body.tools).toEqual([{ google_search: {} }]);
+			return sse([{ candidates: [{ content: { parts: [{ text: "Recent Google answer" }] } }] }]);
+		};
+		const result = await callProvider(context(), model({ api: "google-generative-ai" }), { query: "recent news", urls: [], searchedAt: SEARCHED_AT });
+		expect(result.text).toBe("Recent Google answer");
 	});
 
 	test("builds Google URL Context requests and captures retrieval status", async () => {
@@ -132,6 +177,10 @@ describe("provider adapters", () => {
 			expect(url).toBe("https://api.example.test/v1/models/test-model:streamGenerateContent?alt=sse");
 			expect(new Headers(init?.headers).get("x-goog-api-key")).toBe("test-key");
 			const body = JSON.parse(String(init?.body));
+			const prompt = body.contents[0].parts[0].text;
+			expect(prompt).toBe("summarize\n\nURLs:\nhttps://example.com/");
+			expect(prompt).not.toContain("Current date and time:");
+			expect(prompt).not.toContain("Do not repeat a grounded search");
 			expect(body.tools).toEqual([{ url_context: {} }]);
 			return sse([{ candidates: [{ content: { parts: [{ text: "Summary" }] }, urlContextMetadata: { urlMetadata: [{ retrievedUrl: "https://example.com/", urlRetrievalStatus: "URL_RETRIEVAL_STATUS_SUCCESS" }] } }] }]);
 		};

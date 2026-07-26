@@ -10,6 +10,7 @@ import {
 	safeTitle,
 } from "./safety.ts";
 import { deadlineSignal, readJsonSse } from "./sse.ts";
+import { buildWebSearchPrompt } from "./temporal.ts";
 import type {
 	Citation,
 	ProviderResult,
@@ -22,6 +23,7 @@ import type {
 interface ProviderRequest {
 	query: string;
 	urls: string[];
+	searchedAt?: string;
 	urlContextOnly?: boolean;
 }
 
@@ -218,9 +220,7 @@ async function callOpenAi(
 		if (!headers.has("originator")) headers.set("originator", "codex_cli_rs");
 	}
 
-	const prompt = request.urls.length
-		? `${request.query}\n\nAlso analyze these public URLs:\n${request.urls.join("\n")}`
-		: request.query;
+	const prompt = buildWebSearchPrompt(request.query, request.urls, request.searchedAt);
 	const body: Record<string, unknown> = {
 		model: model.id,
 		input: codex ? [{ role: "user", content: [{ type: "input_text", text: prompt }] }] : prompt,
@@ -383,9 +383,7 @@ async function callAnthropic(
 			headers.set("x-api-key", auth.apiKey);
 		}
 	}
-	const prompt = request.urls.length
-		? `${request.query}\n\nAlso analyze these public URLs:\n${request.urls.join("\n")}`
-		: request.query;
+	const prompt = buildWebSearchPrompt(request.query, request.urls, request.searchedAt);
 	const body = {
 		model: model.id,
 		max_tokens: Math.min(Math.max(1_024, Math.floor(model.maxTokens / 3) || 4_096), 8_192),
@@ -460,9 +458,7 @@ function googleUrl(model: Model<Api>): string {
 
 function buildGoogleContents(request: ProviderRequest): unknown[] {
 	if (!request.urlContextOnly) {
-		const prompt = request.urls.length
-			? `${request.query}\n\nAlso analyze these public URLs:\n${request.urls.join("\n")}`
-			: request.query;
+		const prompt = buildWebSearchPrompt(request.query, request.urls, request.searchedAt);
 		return [{ role: "user", parts: [{ text: prompt }] }];
 	}
 	const youtube = request.urls.filter((url) => YOUTUBE_URL.test(url));

@@ -7,6 +7,8 @@ Provider-native web search for Pi. This extension is auto-discovered globally fr
 - `web_search`: Google Gemini grounding, OpenAI Responses web search, OpenAI Codex web search, or Anthropic server web search.
 - `url_context`: Google Gemini URL Context for up to 20 public URLs. It is hidden when the current conversation model is not Gemini.
 
+`web_search` sends the search execution time to the provider and returns the same UTC timestamp in its visible output and `details.searchedAt`. This gives both the search model and the calling agent an explicit reference for recent events and dates beyond a model's training cutoff.
+
 Both tools reject non-public or non-HTTP(S) URLs, bound stream/result sizes, remove raw provider payloads from session details, and require HTTPS model endpoints except loopback development servers.
 
 ## Dedicated search model
