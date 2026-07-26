@@ -69,6 +69,13 @@ export interface BackgroundLogRead {
 	truncatedToTail: boolean;
 }
 
+export interface ReadinessProgress {
+	job: BackgroundJobSnapshot;
+	logs: BackgroundLogRead;
+	elapsedMs: number;
+	foregroundWaitMs: number;
+}
+
 export interface StartBackgroundJobOptions {
 	command: string;
 	name?: string;
@@ -76,6 +83,7 @@ export interface StartBackgroundJobOptions {
 	env?: NodeJS.ProcessEnv;
 	readiness?: ReadinessRequest;
 	signal?: AbortSignal;
+	onReadinessProgress?: (progress: ReadinessProgress) => void;
 }
 
 export interface StartBackgroundJobResult {

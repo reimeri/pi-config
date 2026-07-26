@@ -13,12 +13,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { READINESS_FOREGROUND_WAIT_MS, READINESS_MAX_TIMEOUT_MS } from "./config.ts";
 import { BackgroundProcessManager } from "./process-manager.ts";
 import type {
 	BackgroundJobSnapshot,
 	BackgroundLogRead,
 	BackgroundTerminalConfig,
 	ReadinessPatternType,
+	ReadinessProgress,
 } from "./types.ts";
 
 const JOB_STATUSES = ["starting", "running", "stopping", "exited", "killed", "failed"] as const;
@@ -27,6 +29,8 @@ const JOB_ID_PATTERN = "^bg-[1-9][0-9]*$";
 const COMMAND_MAX_LENGTH = 100_000;
 const NAME_MAX_LENGTH = 80;
 const PATTERN_MAX_LENGTH = 1_000;
+const READINESS_FOREGROUND_WAIT_SECONDS = READINESS_FOREGROUND_WAIT_MS / 1000;
+const READY_TIMEOUT_MAX_SECONDS = READINESS_MAX_TIMEOUT_MS / 1000;
 const DETAILS_MAX_BYTES = 16 * 1024;
 const DETAILS_MAX_LINES = 200;
 const LOG_PAGE_METADATA_RESERVE_BYTES = 2 * 1024;
@@ -64,6 +68,7 @@ interface LogToolSummary {
 interface StartToolDetails {
 	job: JobToolSummary;
 	logs: LogToolSummary;
+	progressMessage?: string;
 	truncation?: TruncationResult;
 }
 
@@ -104,7 +109,8 @@ export function formatBackgroundJob(job: BackgroundJobSnapshot): string {
 	const identity = job.name ? `${job.id} (${normalizeInline(job.name)})` : job.id;
 	const pid = job.pid === undefined ? "pid=?" : `pid=${job.pid}`;
 	const exit = job.exitCode === undefined ? "" : ` exit=${job.exitCode ?? "null"}`;
-	return `${identity} ${job.status} ${pid} ${formatDuration(duration)}${exit} — ${commandPreview(job.command)}`;
+	const readiness = job.readiness.status === "not_requested" ? "" : ` readiness=${job.readiness.status}`;
+	return `${identity} ${job.status} ${pid} ${formatDuration(duration)}${exit}${readiness} — ${commandPreview(job.command)}`;
 }
 
 function summarizeJob(job: BackgroundJobSnapshot): JobToolSummary {
@@ -195,6 +201,34 @@ function tailLines(text: string, count: number): string {
 	return lines.slice(Math.max(0, lines.length - count)).join("\n");
 }
 
+function quotedPattern(pattern: string | undefined): string {
+	return JSON.stringify(commandPreview(pattern ?? "", 120));
+}
+
+function formatReadinessProgress(progress: ReadinessProgress): string {
+	const elapsed = Math.min(progress.elapsedMs, progress.foregroundWaitMs);
+	const foregroundRemaining = Math.max(0, progress.foregroundWaitMs - progress.elapsedMs);
+	const hardRemaining = Math.max(0, (progress.job.readiness.timeoutMs ?? 0) - progress.elapsedMs);
+	return `Waiting for readiness pattern ${quotedPattern(progress.job.readiness.pattern)} (${formatDuration(elapsed)} elapsed; foreground return in ${formatDuration(foregroundRemaining)}; hard timeout in ${formatDuration(hardRemaining)})`;
+}
+
+function readinessDiagnostic(job: BackgroundJobSnapshot, foregroundWaitMs: number): string | undefined {
+	const readiness = job.readiness;
+	const pattern = quotedPattern(readiness.pattern);
+	switch (readiness.status) {
+		case "waiting":
+			return `Readiness pattern ${pattern} was not observed during the ${formatDuration(foregroundWaitMs)} foreground wait. Monitoring continues asynchronously for up to ${formatDuration(readiness.timeoutMs ?? foregroundWaitMs)} total; ${job.id} is still ${job.status}. Inspect background_logs or test the service directly.`;
+		case "timed_out":
+			return `Readiness pattern ${pattern} was not observed within ${formatDuration(readiness.timeoutMs ?? foregroundWaitMs)}. ${job.id} remains managed with status ${job.status}. Inspect background_logs or test the service directly.`;
+		case "exited":
+			return `${job.id} exited before readiness pattern ${pattern} was observed. Inspect the recent output below.`;
+		case "budget_exceeded":
+			return `Readiness regex ${pattern} exceeded its matching budget. ${job.id} remains managed with status ${job.status}; inspect background_logs or test the service directly.`;
+		default:
+			return undefined;
+	}
+}
+
 export function registerBackgroundTerminalTools(
 	pi: ExtensionAPI,
 	manager: BackgroundProcessManager,
@@ -204,10 +238,12 @@ export function registerBackgroundTerminalTools(
 		name: "background_start",
 		label: "Background Start",
 		description:
-			`Start a long-running shell command in a session-scoped background process. Returns after spawning, or optionally waits for a readiness substring/safe regex. Readiness defaults to ${config.defaultReadinessTimeoutMs / 1000}s. A readiness timeout leaves the job running. Captured output is retained in a bounded tail and tool output is limited to ${DEFAULT_MAX_LINES} lines/${formatSize(DEFAULT_MAX_BYTES)}.`,
+			`Start a long-running shell command in a session-scoped background process. Returns after spawning, or optionally waits for a known readiness substring/safe regex. Readiness defaults to ${config.defaultReadinessTimeoutMs / 1000}s and is limited to ${READY_TIMEOUT_MAX_SECONDS}s. Explicit longer waits return after ${READINESS_FOREGROUND_WAIT_SECONDS}s while monitoring continues asynchronously. A readiness timeout leaves the job running. Captured output is retained in a bounded tail and tool output is limited to ${DEFAULT_MAX_LINES} lines/${formatSize(DEFAULT_MAX_BYTES)}.`,
 		promptSnippet: "Start a long-running server or watcher in a managed background process",
 		promptGuidelines: [
 			"Use background_start for long-running servers and watchers instead of appending '&' in bash.",
+			"With background_start, only set ready_pattern when the exact marker is known from documentation, source, or previously observed output; never invent a likely readiness phrase.",
+			"When background_start command output is unknown, omit ready_pattern, inspect background_logs, and test the service directly; prefer a literal substring over a regex.",
 			"After background_start reports readiness, use bash or another foreground tool to call and test the background service.",
 		],
 		parameters: Type.Object({
@@ -224,15 +260,21 @@ export function registerBackgroundTerminalTools(
 				Type.String({
 					minLength: 1,
 					maxLength: PATTERN_MAX_LENGTH,
-					description: "Optional output substring or safe JavaScript regex that indicates readiness",
+					description:
+						"Optional readiness marker copied from known command output. Do not invent a likely phrase; omit this when startup output is unknown.",
 				}),
 			),
 			ready_pattern_type: Type.Optional(StringEnum(READINESS_PATTERN_TYPES)),
 			ready_timeout_seconds: Type.Optional(
-				Type.Number({ minimum: 0.1, maximum: 600, description: "Readiness wait timeout in seconds" }),
+				Type.Number({
+					minimum: 0.1,
+					maximum: READY_TIMEOUT_MAX_SECONDS,
+					description:
+						`Readiness monitoring timeout in seconds (maximum ${READY_TIMEOUT_MAX_SECONDS}). Values above ${READINESS_FOREGROUND_WAIT_SECONDS}s continue asynchronously after the foreground wait returns.`,
+				}),
 			),
 		}),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			if (!params.ready_pattern && (params.ready_pattern_type || params.ready_timeout_seconds !== undefined)) {
 				throw new Error("ready_pattern is required when readiness options are provided");
 			}
@@ -255,9 +297,28 @@ export function registerBackgroundTerminalTools(
 				env: sessionEnvironment(ctx),
 				readiness,
 				signal,
+				onReadinessProgress: onUpdate
+					? (progress) => {
+							const progressMessage = formatReadinessProgress(progress);
+							const recentOutput = progress.logs.text || "(no output yet)";
+							onUpdate({
+								content: [{ type: "text", text: `${progressMessage}\n\n${recentOutput}` }],
+								details: {
+									job: summarizeJob(progress.job),
+									logs: summarizeLogs(progress.logs),
+									progressMessage,
+								} as StartToolDetails,
+							});
+						}
+					: undefined,
 			});
+			const foregroundWaitMs = readiness
+				? Math.min(readiness.timeoutMs, READINESS_FOREGROUND_WAIT_MS)
+				: 0;
+			const diagnostic = readiness ? readinessDiagnostic(result.job, foregroundWaitMs) : undefined;
 			const metadata = `[job=${result.job.id} status=${result.job.status} readiness=${result.job.readiness.status} next_cursor=${result.logs.nextCursor}]`;
-			const combined = result.logs.text ? `${result.logs.text}\n\n${metadata}` : metadata;
+			const sections = [diagnostic, result.logs.text, metadata].filter((section): section is string => Boolean(section));
+			const combined = sections.join("\n\n");
 			const limited = limitTail(combined, `Use background_logs with id ${result.job.id} for retained output.`);
 			return {
 				content: [{ type: "text", text: limited.text }],
@@ -281,7 +342,12 @@ export function registerBackgroundTerminalTools(
 			if (!details) return new Text(resultText(result.content), 0, 0);
 			const readinessColor = details.job.readinessStatus === "ready" ? "success" : "warning";
 			let text = `${theme.fg("success", "✓")} ${theme.fg("accent", details.job.id)} ${theme.fg("muted", details.job.status)} ${theme.fg(readinessColor, `readiness=${details.job.readinessStatus}`)}`;
-			if (options.expanded && details.logs.excerpt) text += `\n${theme.fg("toolOutput", details.logs.excerpt)}`;
+			if (details.progressMessage) text += `\n${theme.fg("muted", details.progressMessage)}`;
+			const showDiagnosticLogs = details.job.readinessStatus !== "ready" && details.job.readinessStatus !== "not_requested";
+			if ((options.expanded || details.progressMessage || showDiagnosticLogs) && details.logs.excerpt) {
+				const excerpt = options.expanded ? details.logs.excerpt : tailLines(details.logs.excerpt, 8);
+				text += `\n${theme.fg("toolOutput", excerpt)}`;
+			}
 			return new Text(text, 0, 0);
 		},
 	});
@@ -359,8 +425,15 @@ export function registerBackgroundTerminalTools(
 				maxBytes: DEFAULT_MAX_BYTES - LOG_PAGE_METADATA_RESERVE_BYTES,
 			});
 			const body = logs.text || "(no new output)";
-			const metadata = `[job=${logs.job.id} status=${logs.job.status} start_cursor=${logs.startCursor} next_cursor=${logs.nextCursor} retained_start_cursor=${logs.job.logStartCursor} dropped_before=${logs.droppedBefore}]`;
+			const metadata = `[job=${logs.job.id} status=${logs.job.status} readiness=${logs.job.readiness.status} start_cursor=${logs.startCursor} next_cursor=${logs.nextCursor} retained_start_cursor=${logs.job.logStartCursor} dropped_before=${logs.droppedBefore}]`;
 			const notices: string[] = [];
+			if (logs.job.readiness.status === "waiting") {
+				notices.push("readiness monitoring is still in progress");
+			} else if (logs.job.readiness.status === "timed_out") {
+				notices.push(
+					`readiness pattern ${quotedPattern(logs.job.readiness.pattern)} was not observed within ${formatDuration(logs.job.readiness.timeoutMs ?? 0)}`,
+				);
+			}
 			if (logs.droppedBefore) notices.push("requested cursor predates retained output");
 			if (logs.truncatedToTail) {
 				notices.push(
@@ -390,7 +463,7 @@ export function registerBackgroundTerminalTools(
 			const output = details.logs.excerpt || "(no new output)";
 			const visible = options.expanded ? output : tailLines(output, 8);
 			let text = theme.fg("toolOutput", visible);
-			text += `\n${theme.fg("dim", `next_cursor=${details.logs.nextCursor} status=${details.logs.job.status}`)}`;
+			text += `\n${theme.fg("dim", `next_cursor=${details.logs.nextCursor} status=${details.logs.job.status} readiness=${details.logs.job.readinessStatus}`)}`;
 			return new Text(text, 0, 0);
 		},
 	});

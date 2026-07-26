@@ -4,7 +4,10 @@ const DEFAULT_MAX_LOG_BYTES = 1024 * 1024;
 const DEFAULT_MAX_LOG_LINES = 10_000;
 const DEFAULT_MAX_ACTIVE_JOBS = 16;
 const DEFAULT_MAX_RETAINED_JOBS = 100;
-const DEFAULT_READINESS_TIMEOUT_MS = 10_000;
+export const READINESS_MIN_TIMEOUT_MS = 100;
+export const READINESS_FOREGROUND_WAIT_MS = 10_000;
+export const READINESS_MAX_TIMEOUT_MS = 60_000;
+const DEFAULT_READINESS_TIMEOUT_MS = READINESS_FOREGROUND_WAIT_MS;
 const DEFAULT_KILL_GRACE_MS = 2_000;
 
 function positiveIntegerFromEnv(
@@ -49,8 +52,8 @@ export function loadBackgroundTerminalConfig(): BackgroundTerminalConfig {
 		defaultReadinessTimeoutMs: positiveIntegerFromEnv(
 			"PI_BACKGROUND_TERMINAL_READY_TIMEOUT_MS",
 			DEFAULT_READINESS_TIMEOUT_MS,
-			100,
-			10 * 60 * 1000,
+			READINESS_MIN_TIMEOUT_MS,
+			READINESS_MAX_TIMEOUT_MS,
 		),
 		killGraceMs: positiveIntegerFromEnv(
 			"PI_BACKGROUND_TERMINAL_KILL_GRACE_MS",

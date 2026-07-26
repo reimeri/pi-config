@@ -2,6 +2,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { access } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
+import {
+	READINESS_FOREGROUND_WAIT_MS,
+	READINESS_MAX_TIMEOUT_MS,
+	READINESS_MIN_TIMEOUT_MS,
+} from "./config.ts";
 import { BoundedLogBuffer } from "./log-buffer.ts";
 import {
 	compileReadinessMatcher,
@@ -29,6 +34,8 @@ interface ManagedJob {
 	readinessMatcher?: ReadinessMatcher;
 	readinessWindow: string;
 	readinessMatchedAt?: number;
+	readinessPromise?: Promise<ReadinessResult["status"]>;
+	settleReadiness?: (status: ReadinessResult["status"]) => void;
 	closePromise: Promise<void>;
 	resolveClose: () => void;
 	closed: boolean;
@@ -51,12 +58,17 @@ function delay(milliseconds: number): Promise<void> {
 
 export class BackgroundProcessManager {
 	private readonly config: BackgroundTerminalConfig;
+	private readonly foregroundReadinessWaitMs: number;
 	private readonly jobs = new Map<string, ManagedJob>();
 	private nextId = 1;
 	private shutdownPromise?: Promise<void>;
 
-	constructor(config: BackgroundTerminalConfig) {
+	constructor(config: BackgroundTerminalConfig, foregroundReadinessWaitMs = READINESS_FOREGROUND_WAIT_MS) {
+		if (!Number.isFinite(foregroundReadinessWaitMs) || foregroundReadinessWaitMs <= 0) {
+			throw new Error("Foreground readiness wait must be a positive finite duration");
+		}
 		this.config = config;
+		this.foregroundReadinessWaitMs = Math.min(foregroundReadinessWaitMs, READINESS_FOREGROUND_WAIT_MS);
 	}
 
 	list(status?: BackgroundJobSnapshot["status"]): BackgroundJobSnapshot[] {
@@ -86,6 +98,18 @@ export class BackgroundProcessManager {
 		if (this.shutdownPromise) throw new Error("Background terminal manager is shutting down");
 		if (process.platform === "win32") throw new Error("Background terminals currently support Linux and macOS only");
 		if (options.signal?.aborted) throw new Error("Background start aborted before spawning");
+		if (
+			options.readiness
+			&& (
+				!Number.isFinite(options.readiness.timeoutMs)
+				|| options.readiness.timeoutMs < READINESS_MIN_TIMEOUT_MS
+				|| options.readiness.timeoutMs > READINESS_MAX_TIMEOUT_MS
+			)
+		) {
+			throw new Error(
+				`Readiness timeout must be between ${READINESS_MIN_TIMEOUT_MS / 1000} and ${READINESS_MAX_TIMEOUT_MS / 1000} seconds`,
+			);
+		}
 		const readinessMatcher = options.readiness
 			? compileReadinessMatcher(options.readiness)
 			: undefined;
@@ -170,7 +194,14 @@ export class BackgroundProcessManager {
 
 		if (!job.closed) job.snapshot.status = "running";
 		if (options.readiness) {
-			const readinessStatus = await this.waitForReadiness(job, options.readiness, options.signal);
+			this.startReadinessMonitor(job, options.readiness);
+			const foregroundWaitMs = Math.min(options.readiness.timeoutMs, this.foregroundReadinessWaitMs);
+			const readinessStatus = await this.waitForReadinessForeground(
+				job,
+				foregroundWaitMs,
+				options.signal,
+				options.onReadinessProgress,
+			);
 			if (readinessStatus === "aborted") {
 				await this.kill(id);
 				throw new Error(`Background start aborted; ${id} was terminated`);
@@ -278,7 +309,12 @@ export class BackgroundProcessManager {
 			const appended = job.buffer.append(stream, text);
 			if (!appended) return;
 			const matcher = job.readinessMatcher;
-			if (matcher && job.readinessMatchedAt === undefined && !matcher.exhausted) {
+			if (
+				job.snapshot.readiness.status === "waiting"
+				&& matcher
+				&& job.readinessMatchedAt === undefined
+				&& !matcher.exhausted
+			) {
 				const candidate = job.readinessWindow + appended;
 				if (scanReadinessWindows(matcher, candidate)) {
 					job.readinessMatchedAt = Date.now();
@@ -327,22 +363,21 @@ export class BackgroundProcessManager {
 		});
 	}
 
-	private waitForReadiness(
-		job: ManagedJob,
-		request: ReadinessRequest,
-		signal?: AbortSignal,
-	): Promise<ReadinessResult["status"]> {
-		return new Promise((resolve) => {
+	private startReadinessMonitor(job: ManagedJob, request: ReadinessRequest): void {
+		if (job.readinessPromise) return;
+		job.readinessPromise = new Promise((resolve) => {
 			let settled = false;
 			const finish = (status: ReadinessResult["status"]) => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timeout);
 				job.outputListeners.delete(checkOutput);
-				signal?.removeEventListener("abort", onAbort);
-				job.snapshot.readiness.status = status;
-				if (status === "ready") {
-					job.snapshot.readiness.matchedAt = job.readinessMatchedAt ?? Date.now();
+				job.settleReadiness = undefined;
+				if (job.snapshot.readiness.status === "waiting") {
+					job.snapshot.readiness.status = status;
+					if (status === "ready") {
+						job.snapshot.readiness.matchedAt = job.readinessMatchedAt ?? Date.now();
+					}
 				}
 				resolve(status);
 			};
@@ -350,12 +385,69 @@ export class BackgroundProcessManager {
 				if (job.readinessMatchedAt !== undefined) finish("ready");
 				else if (job.readinessMatcher?.exhausted) finish("budget_exceeded");
 			};
-			const onAbort = () => finish("aborted");
 			const timeout = setTimeout(() => finish("timed_out"), request.timeoutMs);
+			timeout.unref();
+			job.settleReadiness = finish;
 			job.outputListeners.add(checkOutput);
 			job.closePromise.then(() => finish("exited"));
-			if (signal) signal.addEventListener("abort", onAbort, { once: true });
 			checkOutput();
+		});
+	}
+
+	private waitForReadinessForeground(
+		job: ManagedJob,
+		foregroundWaitMs: number,
+		signal?: AbortSignal,
+		onProgress?: StartBackgroundJobOptions["onReadinessProgress"],
+	): Promise<ReadinessResult["status"]> {
+		const readinessPromise = job.readinessPromise;
+		if (!readinessPromise) return Promise.resolve(job.snapshot.readiness.status);
+		const startedAt = Date.now();
+		return new Promise((resolve) => {
+			let settled = false;
+			let lastProgressAt = 0;
+			let lastProgressCursor = -1;
+			const emitProgress = (force = false) => {
+				if (!onProgress || settled || job.snapshot.readiness.status !== "waiting") return;
+				const now = Date.now();
+				const cursor = job.buffer.nextCursor;
+				if (!force && cursor === lastProgressCursor) return;
+				if (!force && lastProgressCursor > 0 && now - lastProgressAt < 200) return;
+				lastProgressAt = now;
+				lastProgressCursor = cursor;
+				try {
+					onProgress({
+						job: this.snapshot(job),
+						logs: this.readLogs(job.snapshot.id, { tailLines: 8, maxBytes: 8 * 1024 }),
+						elapsedMs: now - startedAt,
+						foregroundWaitMs,
+					});
+				} catch {
+					// A progress renderer must not affect process management.
+				}
+			};
+			const progressOutput = () => emitProgress();
+			const finish = (status: ReadinessResult["status"]) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(softTimeout);
+				clearInterval(progressInterval);
+				job.outputListeners.delete(progressOutput);
+				signal?.removeEventListener("abort", onAbort);
+				resolve(status);
+			};
+			const onAbort = () => {
+				job.settleReadiness?.("aborted");
+				finish("aborted");
+			};
+			const softTimeout = setTimeout(() => finish(job.snapshot.readiness.status), foregroundWaitMs);
+			const progressInterval = setInterval(() => emitProgress(true), 1000);
+			softTimeout.unref();
+			progressInterval.unref();
+			job.outputListeners.add(progressOutput);
+			if (signal) signal.addEventListener("abort", onAbort, { once: true });
+			readinessPromise.then(finish);
+			emitProgress(true);
 		});
 	}
 

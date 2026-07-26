@@ -18,9 +18,11 @@ Parameters:
 - `ready_pattern_type` — `substring` (default) or `regex`.
 - `ready_timeout_seconds` — optional readiness timeout, defaulting to 10 seconds.
 
-Without a readiness pattern, the tool returns after the process spawns. With a pattern, it returns when the pattern is observed, the process exits, the wait is aborted, or the timeout expires.
+Without a readiness pattern, the tool returns after the process spawns. With a pattern, it waits in the foreground for at most 10 seconds. A shorter requested timeout still applies normally. For an explicit timeout longer than 10 seconds, the tool returns with readiness still `waiting` and continues monitoring the process asynchronously until the pattern is observed, the process exits, or the requested timeout expires. Readiness waits are limited to 60 seconds.
 
-A readiness timeout leaves the process running so the agent can inspect its logs or test it directly. Aborting the tool while it waits for readiness terminates the newly started process.
+Only request a readiness pattern when the exact marker is known from the command's documentation, source, or previously observed output. Do not invent a likely phrase. When startup output is unknown, omit the pattern, inspect `background_logs`, and test the service directly. Prefer a literal substring over a regex unless variable output makes a regex necessary.
+
+A readiness timeout leaves the process running so the agent can inspect its logs or test it directly. Aborting the tool during its foreground wait terminates the newly started process. While waiting, the tool streams elapsed time and recent output as progress updates.
 
 Regex readiness intentionally supports a safe subset: groups, alternation, backreferences, all unbounded quantifiers, and unbounded ranges are rejected. Use bounded forms such as `\\d{1,6}` instead of `\\d+`. The maximum possible match width is limited to the rolling-window overlap so cross-chunk matches remain reliable and readiness checks cannot grow with total log size.
 
@@ -68,7 +70,7 @@ Configuration uses optional environment variables. Invalid or out-of-range value
 | `PI_BACKGROUND_TERMINAL_MAX_LINES` | `10000` | Maximum retained log lines per job |
 | `PI_BACKGROUND_TERMINAL_MAX_ACTIVE_JOBS` | `16` | Maximum concurrently active process groups |
 | `PI_BACKGROUND_TERMINAL_MAX_RETAINED_JOBS` | `100` | Maximum active and completed job records retained together |
-| `PI_BACKGROUND_TERMINAL_READY_TIMEOUT_MS` | `10000` | Default readiness timeout |
+| `PI_BACKGROUND_TERMINAL_READY_TIMEOUT_MS` | `10000` | Default readiness timeout; accepted range is 100–60000 ms |
 | `PI_BACKGROUND_TERMINAL_KILL_GRACE_MS` | `2000` | Delay between `SIGTERM` and `SIGKILL` |
 
 Every individual tool result is additionally limited to Pi's standard 50KB or 2000 lines, whichever is reached first. Larger retained output remains available through later `background_logs` calls until it ages out of the bounded buffer.
