@@ -56,7 +56,7 @@ Stops a job's Unix process group. It sends `SIGTERM`, waits for the configured g
 - `/ps clear bg-1` — remove a completed job record.
 - `/ps clear completed` — remove all completed job records (`exited` remains an alias).
 
-The interactive manager displays active and completed jobs, provides a static scrollable log viewer, and offers kill or clear actions as appropriate. `/ps` is TUI-only; use the background tools in RPC, JSON, or print modes.
+The interactive manager lists active jobs first, preserves start order within the active and completed groups, provides a static scrollable log viewer, and offers kill or clear actions as appropriate. `/ps` is TUI-only; use the background tools in RPC, JSON, or print modes.
 
 ## Configuration
 

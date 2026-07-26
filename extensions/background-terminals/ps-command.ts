@@ -13,6 +13,7 @@ import {
 	wrapTextWithAnsi,
 	type TUI,
 } from "@earendil-works/pi-tui";
+import { prioritizeActiveJobs } from "./job-order.ts";
 import { BackgroundProcessManager } from "./process-manager.ts";
 import { formatBackgroundJob } from "./tools.ts";
 import type { BackgroundJobSnapshot } from "./types.ts";
@@ -22,6 +23,10 @@ const JOB_ID = /^bg-[1-9][0-9]*$/u;
 function jobOption(manager: BackgroundProcessManager, job: BackgroundJobSnapshot): string {
 	const marker = manager.canKill(job.id) ? "●" : "○";
 	return `${marker} ${job.id} — ${job.name ?? job.command.replace(/\s+/gu, " ").trim().slice(0, 80)} [${job.status}]`;
+}
+
+function listJobsForPs(manager: BackgroundProcessManager): BackgroundJobSnapshot[] {
+	return prioritizeActiveJobs(manager.list(), (job) => manager.canKill(job.id));
 }
 
 class JobLogsComponent {
@@ -190,7 +195,7 @@ async function showManager(
 	}
 
 	while (true) {
-		const jobs = manager.list();
+		const jobs = listJobsForPs(manager);
 		const options = jobs.map((job) => jobOption(manager, job));
 		if (jobs.some((job) => !manager.canKill(job.id))) options.push("Clear completed records");
 		options.push("Close");
@@ -217,13 +222,14 @@ export function registerBackgroundPsCommand(
 	pi.registerCommand("ps", {
 		description: "Manage session-scoped background jobs; /ps [id|kill <id>|clear <id|completed>]",
 		getArgumentCompletions: (prefix) => {
+			const jobs = listJobsForPs(manager);
 			const candidates = [
 				"kill ",
 				"clear completed",
 				"clear exited",
-				...manager.list().map((job) => job.id),
-				...manager.list().filter((job) => manager.canKill(job.id)).map((job) => `kill ${job.id}`),
-				...manager.list().filter((job) => !manager.canKill(job.id)).map((job) => `clear ${job.id}`),
+				...jobs.map((job) => job.id),
+				...jobs.filter((job) => manager.canKill(job.id)).map((job) => `kill ${job.id}`),
+				...jobs.filter((job) => !manager.canKill(job.id)).map((job) => `clear ${job.id}`),
 			];
 			const matches = [...new Set(candidates)]
 				.filter((candidate) => candidate.startsWith(prefix))

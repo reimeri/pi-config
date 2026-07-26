@@ -4,5 +4,8 @@
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.6-sol",
   "defaultThinkingLevel": "high",
-  "editorPaddingX": 1
+  "editorPaddingX": 1,
+  "compaction": {
+    "enabled": false
+  }
 }
