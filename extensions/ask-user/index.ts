@@ -2,37 +2,14 @@ import type { ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { setToolMode, type ToolModeDefinition } from "./tool-modes/protocol.ts";
-
-interface QuestionOption {
-	label: string;
-	description?: string;
-}
-
-interface NormalizedQuestion {
-	id: string;
-	question: string;
-	options: QuestionOption[];
-	allowOther: boolean;
-	placeholder?: string;
-}
-
-interface Answer {
-	id: string;
-	question: string;
-	answer: string;
-	selectedOption?: number;
-	wasCustom: boolean;
-}
-
-type AskUserStatus = "answered" | "cancelled" | "empty" | "aborted" | "unavailable";
-
-interface AskUserDetails {
-	questions: NormalizedQuestion[];
-	answers: Answer[];
-	status: AskUserStatus;
-	stoppedAt?: string;
-}
+import {
+	answerSummary,
+	runAskUserFlow,
+	type AskUserDetails,
+	type AskUserStatus,
+	type NormalizedQuestion,
+} from "./flow.ts";
+import { setToolMode, type ToolModeDefinition } from "../tool-modes/protocol.ts";
 
 const OptionSchema = Type.Object({
 	label: Type.String({ minLength: 1, maxLength: 200, pattern: "\\S", description: "Concise option label" }),
@@ -76,24 +53,6 @@ const AskUserParams = Type.Object({
 		description: "One or more related questions to ask in order",
 	}),
 });
-
-function formatChoice(option: QuestionOption, index: number): string {
-	const description = option.description?.trim();
-	return `${index + 1}. ${option.label}${description ? ` — ${description}` : ""}`;
-}
-
-const MAX_ANSWER_LENGTH = 10_000;
-
-function normalizeAnswer(value: string): string {
-	const trimmed = value.trim();
-	if (trimmed.length <= MAX_ANSWER_LENGTH) return trimmed;
-	return `${trimmed.slice(0, MAX_ANSWER_LENGTH)}\n[Answer truncated to ${MAX_ANSWER_LENGTH} characters]`;
-}
-
-function answerSummary(answer: Answer): string {
-	const prefix = answer.selectedOption === undefined ? "wrote" : `selected ${answer.selectedOption}`;
-	return `${answer.id}: user ${prefix}: ${answer.answer}`;
-}
 
 function currentAssistantAskUserCallIds(ctx: ExtensionContext): string[] {
 	const branch = ctx.sessionManager.getBranch();
@@ -185,107 +144,36 @@ export default function askUserExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const answers: Answer[] = [];
-
-			for (let index = 0; index < questions.length; index++) {
-				const question = questions[index];
-				const position = questions.length > 1 ? ` (${index + 1}/${questions.length})` : "";
-				const title = `Clarification${position}: ${question.question}`;
-				let answer: Answer | undefined;
-				let stopStatus: AskUserStatus = "cancelled";
-
-				if (question.options.length > 0) {
-					const choices = question.options.map(formatChoice);
-					const otherChoice = `${choices.length + 1}. Other — type a custom answer`;
-					if (question.allowOther) choices.push(otherChoice);
-
-					const selected = await ctx.ui.select(title, choices, { signal });
-					if (selected === undefined) {
-						stopStatus = signal?.aborted ? "aborted" : "cancelled";
-					} else {
-						const selectedIndex = choices.indexOf(selected);
-						if (selectedIndex >= 0 && selectedIndex < question.options.length) {
-							answer = {
-								id: question.id,
-								question: question.question,
-								answer: question.options[selectedIndex].label,
-								selectedOption: selectedIndex + 1,
-								wasCustom: false,
-							};
-						} else if (selected === otherChoice) {
-							const custom = await ctx.ui.input(
-								`Custom answer${position}: ${question.question}`,
-								question.placeholder ?? "Type your answer",
-								{ signal },
-							);
-							if (custom === undefined) {
-								stopStatus = signal?.aborted ? "aborted" : "cancelled";
-							} else if (custom.trim() === "") {
-								stopStatus = "empty";
-							} else {
-								answer = {
-									id: question.id,
-									question: question.question,
-									answer: normalizeAnswer(custom),
-									wasCustom: true,
-								};
-							}
-						}
-					}
-				} else {
-					const custom = await ctx.ui.input(
-						title,
-						question.placeholder ?? "Type your answer",
-						{ signal },
-					);
-					if (custom === undefined) {
-						stopStatus = signal?.aborted ? "aborted" : "cancelled";
-					} else if (custom.trim() === "") {
-						stopStatus = "empty";
-					} else {
-						answer = {
-							id: question.id,
-							question: question.question,
-							answer: normalizeAnswer(custom),
-							wasCustom: true,
-						};
-					}
-				}
-
-				if (!answer) {
-					const details: AskUserDetails = {
-						questions,
-						answers,
-						status: stopStatus,
-						stoppedAt: question.id,
-					};
-					const reason =
-						stopStatus === "aborted"
-							? "The question dialog was aborted"
-							: stopStatus === "empty"
-								? "User submitted an empty answer"
-								: "User cancelled the question dialog";
-					const partial =
-						answers.length > 0
-							? ` Answers received before it stopped:\n${answers.map(answerSummary).join("\n")}`
-							: "";
-					return {
-						content: [
-							{
-								type: "text",
-								text: `${reason} at ${question.id}. Do not assume an answer.${partial}`,
-							},
-						],
-						details,
-					};
-				}
-
-				answers.push(answer);
+			const details = await runAskUserFlow(questions, ctx.ui, signal, {
+				allowBackNavigation: ctx.mode === "tui",
+			});
+			if (details.status === "answered") {
+				return {
+					content: [{ type: "text", text: details.answers.map(answerSummary).join("\n") }],
+					details,
+				};
 			}
 
-			const details: AskUserDetails = { questions, answers, status: "answered" };
+			const reason =
+				details.status === "aborted"
+					? details.stoppedAt
+						? "The question dialog was aborted"
+						: "The answer review was aborted"
+					: details.status === "empty"
+						? "User submitted an empty answer"
+						: "User cancelled the question dialog";
+			const location = details.stoppedAt ? ` at ${details.stoppedAt}` : "";
+			const partial =
+				details.answers.length > 0
+					? ` Answers received before it stopped:\n${details.answers.map(answerSummary).join("\n")}`
+					: "";
 			return {
-				content: [{ type: "text", text: answers.map(answerSummary).join("\n") }],
+				content: [
+					{
+						type: "text",
+						text: `${reason}${location}. Do not assume an answer.${partial}`,
+					},
+				],
 				details,
 			};
 		},
