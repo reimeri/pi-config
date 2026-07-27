@@ -8,6 +8,7 @@ import { BoundedStreamMessageReader } from "../../src/protocol/bounded-reader.js
 import { normalizeWorkspaceEdit } from "../../src/workspace/edits.js";
 import { applyManifest } from "../../src/workspace/transaction.js";
 import { DEFAULT_LIMITS } from "../../src/runtime/limits.js";
+import { stableHash } from "../../src/util/text.js";
 
 describe("bounded protocol reader", () => {
   it("handles fragmented/combined frames and rejects oversized bodies", async () => {
@@ -34,5 +35,83 @@ describe("workspace edits", () => {
     const manifest = await normalizeWorkspaceEdit({ changes: { [uri]: [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 11 } }, newText: "LSP" }] } }, root, "utf-16", DEFAULT_LIMITS);
     expect(manifest.applicable).toBe(true); await applyManifest(manifest); expect(await readFile(file, "utf8")).toBe("hello LSP\n");
     await expect(normalizeWorkspaceEdit({ changes: { [uri]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "x" }, { range: { start: { line: 0, character: 2 }, end: { line: 0, character: 4 } }, newText: "y" }] } }, root, "utf-16", DEFAULT_LIMITS)).rejects.toThrow(/Overlapping/);
+  });
+
+  it("assembles the same text a per-edit splice would, across randomized edit sets", async () => {
+    // The staged text is what gets written to the user's files, so the single forward pass has to
+    // agree with the obvious splice-each-edit-in-reverse reference on every shape: insertions,
+    // deletions, replacements, edits meeting end-to-start, and edits at both boundaries.
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-edit-fuzz-"));
+    // Multi-byte but single-unit characters, so every character offset is a legal boundary; astral
+    // characters appear in the replacement text, which is inserted rather than indexed into.
+    const lines = Array.from({ length: 40 }, (_, index) => `const value${index} = compute(${index}, "héllo → wörld");`);
+    const original = `${lines.join("\n")}\n`;
+    const file = join(root, "fuzz.ts");
+    await writeFile(file, original);
+    const uri = pathToFileURL(file).href;
+
+    let seed = 20_260_727;
+    const rand = (n: number): number => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+
+    for (let trial = 0; trial < 120; trial++) {
+      // Non-overlapping ranges within one line, walking forward so they can touch but never cross.
+      const edits = [];
+      const line = rand(lines.length);
+      const width = lines[line]!.length;
+      let column = 0;
+      while (column < width && edits.length < DEFAULT_LIMITS.maxEditsPerFile) {
+        const start = column + rand(4);
+        const end = Math.min(width, start + rand(5));
+        if (start > width) break;
+        const newText = ["", "X", "→🙂", "replacement", "\n  "][rand(5)]!;
+        edits.push({ range: { start: { line, character: start }, end: { line, character: end } }, newText });
+        column = end + rand(3);
+      }
+      if (edits.length === 0) continue;
+
+      const manifest = await normalizeWorkspaceEdit({ changes: { [uri]: edits } }, root, "utf-16", DEFAULT_LIMITS);
+      expect(manifest.applicable, `trial ${trial}`).toBe(true);
+
+      // Reference: splice each edit into an accumulating string, highest offset first, exactly as
+      // the previous implementation did.
+      const offsets = edits.map((edit, index) => {
+        const lineStart = original.split("\n").slice(0, edit.range.start.line).join("\n").length + (edit.range.start.line > 0 ? 1 : 0);
+        return { start: lineStart + edit.range.start.character, end: lineStart + edit.range.end.character, text: edit.newText, index };
+      });
+      let expected = original;
+      for (const item of [...offsets].sort((a, b) => b.start - a.start || b.end - a.end || b.index - a.index)) {
+        expected = expected.slice(0, item.start) + item.text + expected.slice(item.end);
+      }
+      expect(manifest.files[0]!.updated, `trial ${trial}`).toBe(expected);
+    }
+  });
+
+  it("uses one digest of the original for both the snapshot check and the staged hash", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-edit-hash-"));
+    const file = join(root, "a.ts");
+    const original = "hello world\n";
+    await writeFile(file, original);
+    const uri = pathToFileURL(file).href;
+    const edit = { changes: { [uri]: [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 11 } }, newText: "LSP" }] } };
+    // Take the canonical path from a snapshot-free pass so the comparison cannot trip on symlinks.
+    const canonicalPath = (await normalizeWorkspaceEdit(edit, root, "utf-16", DEFAULT_LIMITS)).files[0]!.path;
+    const snapshot = { uri, canonicalPath, version: 1, text: original, contentHash: stableHash(original) };
+
+    const matched = await normalizeWorkspaceEdit(edit, root, "utf-16", DEFAULT_LIMITS, undefined, new Map([[uri, snapshot]]));
+    expect(matched.applicable).toBe(true);
+    expect(matched.files[0]!.hash).toBe(snapshot.contentHash);
+
+    const stale = await normalizeWorkspaceEdit(edit, root, "utf-16", DEFAULT_LIMITS, undefined, new Map([[uri, { ...snapshot, contentHash: stableHash("stale content\n") }]]));
+    expect(stale.applicable).toBe(false);
+    expect(stale.reasons.join(" ")).toMatch(/snapshot hash is inconsistent/);
+  });
+
+  it("stages an unchanged file when the edit list is empty", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-edit-empty-"));
+    const file = join(root, "a.ts");
+    await writeFile(file, "unchanged\n");
+    const manifest = await normalizeWorkspaceEdit({ changes: { [pathToFileURL(file).href]: [] } }, root, "utf-16", DEFAULT_LIMITS);
+    expect(manifest.files[0]?.updated).toBe("unchanged\n");
+    expect(manifest.files[0]?.original).toBe("unchanged\n");
   });
 });

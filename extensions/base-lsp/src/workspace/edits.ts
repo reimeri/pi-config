@@ -43,7 +43,10 @@ export async function normalizeWorkspaceEdit(edit: WorkspaceEdit | null | undefi
     if (snapshot && snapshot.canonicalPath !== path) { reasons.push(`${path} does not match the synchronized snapshot path`); continue; }
     if (snapshot && entry.version !== undefined && entry.version !== null && snapshot.version !== entry.version) { reasons.push(`${path} snapshot version mismatch: server=${entry.version}, snapshot=${snapshot.version}`); continue; }
     const original = snapshot?.text ?? await readFile(path, "utf8");
-    if (snapshot && stableHash(original) !== snapshot.contentHash) { reasons.push(`${path} synchronized snapshot hash is inconsistent`); continue; }
+    // Hashed once: the snapshot check and the staged file's `hash` are the same digest of the same
+    // text, and this is a full pass over the file.
+    const originalHash = stableHash(original);
+    if (snapshot && originalHash !== snapshot.contentHash) { reasons.push(`${path} synchronized snapshot hash is inconsistent`); continue; }
     const info = await stat(path);
     const parentInfo = await stat(dirname(path));
     totalInputBytes += Buffer.byteLength(original);
@@ -51,11 +54,22 @@ export async function normalizeWorkspaceEdit(edit: WorkspaceEdit | null | undefi
     const normalized = entry.edits.map((item, index) => ({ ...serverRangeToOffsets(original, item.range, encoding), text: item.newText, index }));
     normalized.sort((a, b) => a.start - b.start || a.end - b.end || a.index - b.index);
     for (let index = 1; index < normalized.length; index += 1) if (normalized[index]!.start < normalized[index - 1]!.end) throw new Error(`Overlapping edits for ${path}`);
-    let updated = original;
-    for (const item of [...normalized].sort((a, b) => b.start - a.start || b.end - a.end || b.index - a.index)) updated = updated.slice(0, item.start) + item.text + updated.slice(item.end);
+    // Assembled in one forward pass over `normalized`, which is already sorted ascending and proven
+    // non-overlapping just above. Splicing each edit into an accumulating string instead rebuilt the
+    // whole file per edit, so a large file at the per-file edit limit cost hundreds of milliseconds
+    // of copying. Offsets stay valid because every segment is cut from `original`, never from a
+    // partially edited copy — which is what the descending order this replaces was for.
+    const segments: string[] = [];
+    let cursor = 0;
+    for (const item of normalized) {
+      segments.push(original.slice(cursor, item.start), item.text);
+      cursor = item.end;
+    }
+    segments.push(original.slice(cursor));
+    const updated = segments.join("");
     totalOutputBytes += Buffer.byteLength(updated);
     if (totalOutputBytes > limits.maxTransactionBytes) { reasons.push("Workspace edit exceeds transaction output byte limit"); continue; }
-    files.push({ path, uri, original, updated, hash: stableHash(original), mode: info.mode, mtimeMs: info.mtimeMs, ...(Number.isSafeInteger(info.dev) ? { dev: info.dev } : {}), ...(Number.isSafeInteger(info.ino) ? { ino: info.ino } : {}), ...(Number.isSafeInteger(parentInfo.dev) ? { parentDev: parentInfo.dev } : {}), ...(Number.isSafeInteger(parentInfo.ino) ? { parentIno: parentInfo.ino } : {}), ...(entry.version !== undefined ? { version: entry.version } : {}), edits: entry.edits.length });
+    files.push({ path, uri, original, updated, hash: originalHash, mode: info.mode, mtimeMs: info.mtimeMs, ...(Number.isSafeInteger(info.dev) ? { dev: info.dev } : {}), ...(Number.isSafeInteger(info.ino) ? { ino: info.ino } : {}), ...(Number.isSafeInteger(parentInfo.dev) ? { parentDev: parentInfo.dev } : {}), ...(Number.isSafeInteger(parentInfo.ino) ? { parentIno: parentInfo.ino } : {}), ...(entry.version !== undefined ? { version: entry.version } : {}), edits: entry.edits.length });
   }
   return finalize(files, resources, reasons, totalEdits);
 }
