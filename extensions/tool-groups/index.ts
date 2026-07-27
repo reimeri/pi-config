@@ -138,7 +138,7 @@ function isBlankRenderedLine(value: string): boolean {
 
 function statusDot(status: ToolStatus, theme: Theme): string {
 	if (status === "failed") return theme.fg("error", "●");
-	if (status === "done") return theme.fg("success", "●");
+	if (status === "done") return theme.fg("thinkingLow", "●");
 	if (status === "running") return theme.fg("warning", "●");
 	return theme.fg("muted", "○");
 }
@@ -166,7 +166,7 @@ function statusCounts(tools: ToolLike[], theme: Theme): string {
 	const parts: string[] = [];
 	if (counts.running) parts.push(theme.fg("warning", `${counts.running} running`));
 	if (counts.pending) parts.push(theme.fg("muted", `${counts.pending} pending`));
-	if (counts.done) parts.push(theme.fg("success", `${counts.done} done`));
+	if (counts.done) parts.push(theme.fg("thinkingLow", `${counts.done} done`));
 	if (counts.failed) parts.push(theme.fg("error", `${counts.failed} failed`));
 	return parts.join(theme.fg("dim", " · "));
 }

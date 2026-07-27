@@ -62,20 +62,23 @@ function fakeTool(name: string, args: Record<string, unknown>) {
 	};
 }
 
-function fakeTheme() {
+function fakeTheme(colors: string[]) {
 	return {
-		fg: (_color: string, text: string) => text,
+		fg: (color: string, text: string) => {
+			colors.push(color);
+			return text;
+		},
 		bold: (text: string) => text,
 	};
 }
 
-function fakeContext(notices: string[]) {
+function fakeContext(notices: string[], colors: string[]) {
 	let expanded = false;
 	return {
 		mode: "tui",
 		hasUI: true,
 		ui: {
-			theme: fakeTheme(),
+			theme: fakeTheme(colors),
 			notify(message: string) {
 				notices.push(message);
 			},
@@ -101,7 +104,8 @@ describe("tool-groups extension", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-tool-groups-test-"));
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		const notices: string[] = [];
-		const ctx = fakeContext(notices);
+		const colors: string[] = [];
+		const ctx = fakeContext(notices, colors);
 		const shutdowns: Array<(...args: any[]) => unknown> = [];
 
 		const loadGeneration = async () => {
@@ -143,6 +147,8 @@ describe("tool-groups extension", () => {
 			expect(grouped).toContain("Read /tmp/a.ts");
 			expect(grouped).toContain("Bash printf ok");
 			expect(grouped).not.toContain("FULL:read");
+			expect(colors).toContain("thinkingLow");
+			expect(colors).not.toContain("success");
 			expect(singleRoot.render(100)).toEqual(["FULL:read"]);
 			expect(root.render(0)).toEqual([]);
 
