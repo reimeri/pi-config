@@ -65,7 +65,7 @@ function editorTopBar(
 	modes: EditorTopBarMode[],
 	width: number,
 	border: (text: string) => string,
-	accent: (text: string) => string,
+	taskColor: (text: string) => string,
 	modeColor: (text: string) => string,
 ): string {
 	if (width <= 0) return "";
@@ -83,7 +83,7 @@ function editorTopBar(
 
 	return [
 		border("─"),
-		taskText ? accent(taskText) : "",
+		taskText ? taskColor(taskText) : "",
 		border("─".repeat(fillWidth)),
 		modeText ? modeColor(modeText) : "",
 		border("─"),
@@ -97,7 +97,6 @@ class CurrentTaskEditor extends CustomEditor {
 		keybindings: KeybindingsManager,
 		private readonly getTask: () => string | undefined,
 		private readonly getModes: () => EditorTopBarMode[],
-		private readonly accent: (text: string) => string,
 		private readonly warning: (text: string) => string,
 		private readonly error: (text: string) => string,
 	) {
@@ -125,7 +124,7 @@ class CurrentTaskEditor extends CustomEditor {
 			modes,
 			width,
 			activeBorderColor,
-			this.accent,
+			activeBorderColor,
 			activeBorderColor,
 		);
 		return lines;
@@ -239,7 +238,6 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 				keybindings,
 				() => pi.getSessionName(),
 				getActiveModes,
-				(text) => ctx.ui.theme.fg("accent", text),
 				(text) => ctx.ui.theme.fg("warning", text),
 				(text) => ctx.ui.theme.fg("error", text),
 			);
