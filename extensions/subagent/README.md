@@ -1,6 +1,6 @@
 # Subagent extension
 
-Globally installed Pi extension for isolated codebase exploration and review.
+Globally installed Pi extension for isolated codebase exploration, review, and web research.
 
 ## Installed agents
 
@@ -15,6 +15,7 @@ Current user agents:
 |---|---|---|---|
 | `scout` | `openai-codex/gpt-5.6-luna` | `medium` | `read, grep, find, ls, lsp_navigation` |
 | `reviewer` | `openai-codex/gpt-5.6-sol` | `medium` | `read, grep, find, ls, bash, lsp_navigation, lsp_diagnostics` |
+| `researcher` | `openai-codex/gpt-5.6-sol` | `medium` | `read, grep, find, ls, web_search` |
 
 The reviewer prompt restricts `bash` to read-only Git commands. This is an instruction, not an OS-level sandbox.
 
@@ -39,8 +40,8 @@ The model should use `provider/model` syntax. Agent definitions are read fresh f
 
 ## Tool modes
 
-- Single: `{ "agent": "scout", "task": "..." }`
-- Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }] }`
-- Chain: `{ "chain": [{ "agent": "scout", "task": "..." }, { "agent": "reviewer", "task": "Review these findings: {previous}" }] }`
+- Single: `{ "agent": "researcher", "task": "..." }`
+- Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }, { "agent": "researcher", "task": "..." }] }`
+- Chain: `{ "chain": [{ "agent": "researcher", "task": "..." }, { "agent": "reviewer", "task": "Review these findings: {previous}" }] }`
 
 Children run as ephemeral JSON-mode Pi processes. The `subagent` tool is explicitly disabled in children to prevent recursive delegation.
