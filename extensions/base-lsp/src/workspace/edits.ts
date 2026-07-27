@@ -8,8 +8,9 @@ import { stableHash } from "../util/text.js";
 
 export interface StagedFile { path: string; uri: string; original: string; updated: string; hash: string; mode: number; mtimeMs: number; dev?: number; ino?: number; parentDev?: number; parentIno?: number; version?: number | null; edits: number }
 export interface EditManifest { files: StagedFile[]; totalEdits: number; resourceOperations: DocumentChange[]; applicable: boolean; reasons: string[]; fingerprint: string }
+export interface WorkspaceEditSnapshot { uri: string; canonicalPath: string; version: number; text: string; contentHash: string }
 
-export async function normalizeWorkspaceEdit(edit: WorkspaceEdit | null | undefined, boundary: string, encoding: PositionEncoding, limits: { maxEditsPerFile: number; maxTotalEdits: number; maxTransactionFiles: number; maxTransactionBytes: number }, documentVersions?: ReadonlyMap<string, number>): Promise<EditManifest> {
+export async function normalizeWorkspaceEdit(edit: WorkspaceEdit | null | undefined, boundary: string, encoding: PositionEncoding, limits: { maxEditsPerFile: number; maxTotalEdits: number; maxTransactionFiles: number; maxTransactionBytes: number }, documentVersions?: ReadonlyMap<string, number>, documentSnapshots?: ReadonlyMap<string, WorkspaceEditSnapshot>): Promise<EditManifest> {
   if (!edit) return finalize([], [], ["Server returned no workspace edit"]);
   const byUri = new Map<string, { edits: TextEdit[]; version?: number | null }>();
   const resources: DocumentChange[] = [];
@@ -38,7 +39,11 @@ export async function normalizeWorkspaceEdit(edit: WorkspaceEdit | null | undefi
     if (entry.edits.length > limits.maxEditsPerFile) { reasons.push(`${path} exceeds per-file edit limit`); continue; }
     totalEdits += entry.edits.length;
     if (totalEdits > limits.maxTotalEdits) { reasons.push("Workspace edit exceeds total edit limit"); continue; }
-    const original = await readFile(path, "utf8");
+    const snapshot = documentSnapshots?.get(uri);
+    if (snapshot && snapshot.canonicalPath !== path) { reasons.push(`${path} does not match the synchronized snapshot path`); continue; }
+    if (snapshot && entry.version !== undefined && entry.version !== null && snapshot.version !== entry.version) { reasons.push(`${path} snapshot version mismatch: server=${entry.version}, snapshot=${snapshot.version}`); continue; }
+    const original = snapshot?.text ?? await readFile(path, "utf8");
+    if (snapshot && stableHash(original) !== snapshot.contentHash) { reasons.push(`${path} synchronized snapshot hash is inconsistent`); continue; }
     const info = await stat(path);
     const parentInfo = await stat(dirname(path));
     totalInputBytes += Buffer.byteLength(original);

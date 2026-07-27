@@ -13,11 +13,12 @@ import { DocumentStore } from "../runtime/document-store.js";
 import { filePathToUri } from "../workspace/boundary.js";
 
 export type ClientState = "new" | "starting" | "initializing" | "ready" | "stopping" | "stopped" | "failed";
-export interface ClientStatus { server: string; root: string; state: ClientState; pid?: number; activeRequests: number; openDocuments: number; lastUse: number; capabilities?: NormalizedCapabilities; stderr: string; progress: string[]; failure?: string }
+export interface ClientStatus { server: string; root: string; state: ClientState; pid?: number; activeRequests: number; openDocuments: number; lastUse: number; capabilities?: NormalizedCapabilities; serverInfo?: { name: string; version?: string }; stderr: string; progress: string[]; failure?: string }
 
 export class LspClient {
   state: ClientState = "new";
   capabilities?: NormalizedCapabilities;
+  serverInfo?: { name: string; version?: string };
   documents?: DocumentStore;
   lastUse = Date.now();
   activeRequests = 0;
@@ -68,6 +69,7 @@ export class LspClient {
       const normalized = normalizeCapabilities(result.capabilities ?? {});
       if (!(["utf-8", "utf-16", "utf-32"] as const).includes(normalized.positionEncoding)) throw new Error(`Unsupported position encoding: ${String(normalized.positionEncoding)}`);
       this.capabilities = { ...normalized, ...this.server.capabilityOverrides };
+      if (result.serverInfo) this.serverInfo = result.serverInfo;
       await this.notify("initialized", {});
       if (this.server.settings !== undefined) await this.notify("workspace/didChangeConfiguration", { settings: this.server.settings });
       this.documents = new DocumentStore(this.server, this.capabilities, (method, params) => this.notify(method, params), this.limits.maxOpenDocuments, this.limits.maxFileBytes);
@@ -105,6 +107,7 @@ export class LspClient {
       ...(this.process?.child.pid ? { pid: this.process.child.pid } : {}),
       activeRequests: this.activeRequests, openDocuments: this.documents?.list().length ?? 0, lastUse: this.lastUse,
       ...(this.capabilities ? { capabilities: this.capabilities } : {}),
+      ...(this.serverInfo ? { serverInfo: this.serverInfo } : {}),
       stderr: this.process?.stderr() ?? "", progress: [...this.progress.values()].slice(0, 10),
       ...(this.failure ? { failure: sanitizeText(this.failure, 1_000) } : {}),
     };

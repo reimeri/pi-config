@@ -27,6 +27,23 @@ describe("workspace edit safety", () => {
     expect(resource.files).toHaveLength(1); expect(resource.applicable).toBe(false); expect(resource.reasons.join(" ")).toMatch(/Resource operations/);
   });
 
+  it("normalizes versioned edits against the synchronized snapshot", async () => {
+    const { root, a } = await rootWithFiles(); const uri = pathToFileURL(a).href;
+    const original = "const alpha = 1;\n";
+    await writeFile(a, "const diskChanged = 2;\n");
+    const manifest = await normalizeWorkspaceEdit(
+      { documentChanges: [replacement(uri, 4, 6, 11, "beta")] },
+      root,
+      "utf-16",
+      DEFAULT_LIMITS,
+      new Map([[uri, 4]]),
+      new Map([[uri, { uri, canonicalPath: a, version: 4, text: original, contentHash: "4be1c9f74149d8947ca52f0591271dfdb153386c722cffa23182e17d36af8403" }]]),
+    );
+    expect(manifest.files[0]?.original).toBe(original);
+    expect(manifest.files[0]?.updated).toContain("beta");
+    await expect(applyManifest(manifest)).rejects.toThrow(/changed since/);
+  });
+
   it("rejects symlink escapes and stale files before publication", async () => {
     const { root, a } = await rootWithFiles();
     const outside = join(await mkdtemp(join(tmpdir(), "base-lsp-outside-")), "outside.ts"); await writeFile(outside, "outside\n");

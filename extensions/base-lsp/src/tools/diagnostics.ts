@@ -17,6 +17,8 @@ import { sanitizeText } from "../util/text.js";
 interface Inventory extends DiscoveryResult { omittedUnknown?: boolean }
 interface WorkItem { file: string; route: Route }
 interface WorkGroup { route: Route; items: WorkItem[] }
+interface RawEvidence { item: WorkItem; client?: LspClient; snapshot?: DocumentSnapshot; result: DiagnosticEvidence }
+interface GroupDiagnosticResult { evidence: RawEvidence[]; run: { server: string; root?: string; status: string; durationMs: number }; omittedWorkspaceReports: number }
 
 export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGetter): void {
   pi.registerTool({
@@ -40,40 +42,11 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
         const work = await buildWork(runtime, inventory.files, params.server);
         if (!work.length) return envelope("No configured language server matches the selected files.", { ...baseDetails("diagnostics", "no_results", started), files: [], discovery: inventory });
         const groups = groupWork(work);
-        const rawEvidence: Array<{ item: WorkItem; client?: LspClient; snapshot?: DocumentSnapshot; result: DiagnosticEvidence }> = [];
-        const serverRuns: Array<{ server: string; root?: string; status: string; durationMs: number }> = [];
-        let omittedWorkspaceReports = 0;
-        for (const group of groups) {
-          const groupStarted = Date.now();
-          let client: LspClient | undefined;
-          try {
-            const acquired = await runtime.manager.acquire(group.route, signal);
-            client = acquired;
-            runtime.diagnostics.observe(acquired);
-            if (mode === "workspace" && acquired.capabilities?.diagnostics.workspace) {
-              await acquired.documents!.withSynchronizedDocuments(group.items.map((item) => item.file), signal, async (snapshots) => {
-                const results = await runtime.diagnostics.checkWorkspace(acquired, snapshots, waitMs, params.refresh ?? false, signal);
-                omittedWorkspaceReports += results.omittedReports;
-                const byPath = new Map(snapshots.map((snapshot) => [snapshot.canonicalPath, snapshot] as const));
-                for (const item of group.items) {
-                  const snapshot = byPath.get(item.file)!;
-                  rawEvidence.push({ item, client: acquired, snapshot, result: results.evidence.get(snapshot.uri) ?? { state: "unconfirmed", diagnostics: [], message: "No workspace diagnostic evidence" } });
-                }
-              });
-            } else {
-              for (const item of group.items) {
-                await acquired.documents!.withSynchronizedDocument(item.file, signal, async (snapshot) => {
-                  rawEvidence.push({ item, client: acquired, snapshot, result: await runtime.diagnostics.check(acquired, snapshot, waitMs, params.refresh ?? false, signal) });
-                });
-              }
-            }
-            serverRuns.push({ server: group.route.server.id, root: group.route.root, status: "ok", durationMs: Date.now() - groupStarted });
-          } catch (error) {
-            const state = evidenceStateFromError(error);
-            for (const item of group.items) rawEvidence.push({ item, result: { state, diagnostics: [], message: error instanceof Error ? error.message : String(error) } });
-            serverRuns.push({ server: group.route.server.id, root: group.route.root, status: state, durationMs: Date.now() - groupStarted });
-          } finally { if (client) runtime.manager.release(client); }
-        }
+        const concurrency = Math.max(1, Math.min(4, runtime.loaded.config.limits.maxClients, groups.length));
+        const groupResults = await mapConcurrent(groups, concurrency, (group) => runDiagnosticGroup(runtime, group, mode, waitMs, params.refresh ?? false, signal));
+        const rawEvidence = groupResults.flatMap((result) => result.evidence);
+        const serverRuns = groupResults.map((result) => result.run);
+        const omittedWorkspaceReports = groupResults.reduce((total, result) => total + result.omittedWorkspaceReports, 0);
         const evidence: Array<Record<string, unknown>> = [];
         let emittedDiagnostics = 0;
         let omittedDiagnostics = 0;
@@ -98,6 +71,7 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
             underlyingDiagnosticCount: entry.result.diagnostics.length + (entry.result.omittedDiagnostics ?? 0),
             filteredDiagnosticCount: filtered.length,
             possiblyStale: entry.result.possiblyStale ?? false,
+            ...(entry.result.confirmation ? { confirmation: entry.result.confirmation } : {}),
             diagnostics: normalized,
             ...(normalizationError ? { message: `Malformed diagnostic range: ${normalizationError}` } : entry.result.message ? { message: entry.result.message } : {}),
             ...(entry.snapshot ? { contentHash: entry.snapshot.contentHash, version: entry.snapshot.version } : {}),
@@ -105,20 +79,40 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
         }
         const states = evidence.map((entry) => String(entry.state));
         const affirmative = states.filter((state) => state === "clean" || state === "diagnostics").length;
+        const unavailableByServer = new Map<string, { server: string; root: string; files: number; message?: string; installationHint?: string }>();
+        for (const entry of rawEvidence) {
+          if (entry.result.state !== "unavailable") continue;
+          const key = `${entry.item.route.server.id}\0${entry.item.route.root}`;
+          const summary = unavailableByServer.get(key) ?? { server: entry.item.route.server.id, root: entry.item.route.root, files: 0, ...(entry.item.route.server.installationHint ? { installationHint: entry.item.route.server.installationHint } : {}) };
+          summary.files += 1;
+          if (!summary.message && entry.result.message) summary.message = entry.result.message;
+          unavailableByServer.set(key, summary);
+        }
+        const unavailableServers = [...unavailableByServer.values()];
         let status = aggregateStatus(states, affirmative);
         if ((inventory.capped || omittedDiagnostics > 0 || omittedWorkspaceReports > 0) && status === "ok") status = "partial";
         const warnings: string[] = [];
         if (inventory.capped) warnings.push(inventory.omittedUnknown ? `Discovery was capped; at least ${inventory.omitted} matching file(s) were omitted and additional files may be undiscovered.` : `Discovery was capped; ${inventory.omitted} matching file(s) were omitted.`);
         if (omittedDiagnostics) warnings.push(`${omittedDiagnostics} diagnostic(s) were omitted by the output limit.`);
         if (omittedWorkspaceReports) warnings.push(`${omittedWorkspaceReports} additional workspace diagnostic report(s) were omitted.`);
+        if (unavailableServers.length) warnings.push(`${unavailableServers.length} server/root group(s) were unavailable; per-file evidence is retained in details.`);
+        const emittedUnavailable = new Set<string>();
         const lines = evidence.flatMap((entry) => {
           const diagnostics = entry.diagnostics as Array<Record<string, unknown>>;
           if (diagnostics.length) return diagnostics.map((diagnostic) => `${entry.server} ${entry.path}:${(diagnostic.range as any).start.line}:${(diagnostic.range as any).start.character} ${diagnostic.severity} ${diagnostic.message}`);
+          if (entry.state === "unavailable") {
+            const key = `${entry.server}\0${entry.root}`;
+            if (emittedUnavailable.has(key)) return [];
+            emittedUnavailable.add(key);
+            const summary = unavailableByServer.get(key)!;
+            const suffix = summary.message ? ` (${summary.message})` : "";
+            return [`${summary.server} ${summary.root}: unavailable for ${summary.files} file(s)${suffix}`];
+          }
           const filtered = Number(entry.filteredDiagnosticCount ?? 0);
           const suffix = entry.state === "diagnostics" && filtered === 0 ? " (findings exist but none match the severity filter)" : entry.message ? ` (${entry.message})` : "";
           return [`${entry.server} ${entry.path}: ${entry.state}${suffix}`];
         });
-        return envelope(lines.join("\n"), { ...baseDetails("diagnostics", status, started), servers: serverRuns, files: evidence, discovery: inventory, omittedDiagnostics, omittedWorkspaceReports, truncated: omittedDiagnostics > 0 || omittedWorkspaceReports > 0 || inventory.capped, warnings });
+        return envelope(lines.join("\n"), { ...baseDetails("diagnostics", status, started), servers: serverRuns, unavailableServers, coverage: { requested: states.length, affirmative, unavailable: states.filter((state) => state === "unavailable").length, unconfirmed: states.filter((state) => state === "unconfirmed").length }, files: evidence, discovery: inventory, omittedDiagnostics, omittedWorkspaceReports, truncated: omittedDiagnostics > 0 || omittedWorkspaceReports > 0 || inventory.capped, warnings });
       } catch (error) {
         rethrowUnexpected(error);
         const status = statusFromError(error);
@@ -126,6 +120,57 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
       }
     },
   });
+}
+
+async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mode: string, waitMs: number, refresh: boolean, signal?: AbortSignal): Promise<GroupDiagnosticResult> {
+  const started = Date.now();
+  const evidence: RawEvidence[] = [];
+  let omittedWorkspaceReports = 0;
+  let client: LspClient | undefined;
+  try {
+    const acquired = await runtime.manager.acquire(group.route, signal);
+    client = acquired;
+    runtime.diagnostics.observe(acquired);
+    if (mode === "workspace" && acquired.capabilities?.diagnostics.workspace) {
+      await acquired.documents!.withSynchronizedDocuments(group.items.map((item) => item.file), signal, async (snapshots) => {
+        const results = await runtime.diagnostics.checkWorkspace(acquired, snapshots, waitMs, refresh, signal);
+        omittedWorkspaceReports += results.omittedReports;
+        const byPath = new Map(snapshots.map((snapshot) => [snapshot.canonicalPath, snapshot] as const));
+        for (const item of group.items) {
+          const snapshot = byPath.get(item.file)!;
+          evidence.push({ item, client: acquired, snapshot, result: results.evidence.get(snapshot.uri) ?? { state: "unconfirmed", diagnostics: [], message: "No workspace diagnostic evidence" } });
+        }
+      });
+    } else {
+      for (const item of group.items) {
+        const checkpoint = runtime.diagnostics.checkpoint(acquired);
+        await acquired.documents!.withSynchronizedDocument(item.file, signal, async (snapshot) => {
+          evidence.push({ item, client: acquired, snapshot, result: await runtime.diagnostics.check(acquired, snapshot, waitMs, refresh, signal, checkpoint) });
+        });
+      }
+    }
+    return { evidence, run: { server: group.route.server.id, root: group.route.root, status: groupEvidenceStatus(evidence.map((entry) => entry.result.state)), durationMs: Date.now() - started }, omittedWorkspaceReports };
+  } catch (error) {
+    const state = evidenceStateFromError(error);
+    const completed = new Set(evidence.map((entry) => entry.item.file));
+    for (const item of group.items) if (!completed.has(item.file)) evidence.push({ item, result: { state, diagnostics: [], message: error instanceof Error ? error.message : String(error) } });
+    return { evidence, run: { server: group.route.server.id, root: group.route.root, status: groupEvidenceStatus(evidence.map((entry) => entry.result.state)), durationMs: Date.now() - started }, omittedWorkspaceReports };
+  } finally { if (client) runtime.manager.release(client); }
+}
+
+async function mapConcurrent<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
 }
 
 async function inventoryFiles(runtime: SessionRuntime, params: DiagnosticsInput, maxFiles: number, signal?: AbortSignal): Promise<Inventory> {
@@ -190,6 +235,13 @@ function groupWork(work: WorkItem[]): WorkGroup[] {
   return [...groups.values()].sort((a, b) => a.route.server.id.localeCompare(b.route.server.id) || a.route.root.localeCompare(b.route.root));
 }
 
+function groupEvidenceStatus(states: DiagnosticEvidence["state"][]): string {
+  if (!states.length) return "no_results";
+  if (states.every((state) => state === "clean" || state === "diagnostics")) return "ok";
+  if (states.every((state) => state === states[0])) return states[0]!;
+  return "partial";
+}
+
 function aggregateStatus(states: string[], affirmative: number): ToolStatus {
   if (states.length && affirmative === states.length) return "ok";
   if (affirmative) return "partial";
@@ -197,6 +249,7 @@ function aggregateStatus(states: string[], affirmative: number): ToolStatus {
   if (states.every((state) => state === "cancelled")) return "cancelled";
   if (states.every((state) => state === "unavailable")) return "unavailable";
   if (states.every((state) => state === "error")) return "error";
+  if (new Set(states).size > 1) return "partial";
   return "no_results";
 }
 function evidenceStateFromError(error: unknown): DiagnosticEvidence["state"] { const status = statusFromError(error); return status === "timed_out" || status === "cancelled" || status === "unavailable" ? status : "error"; }

@@ -13,12 +13,12 @@ import { fakeServer } from "../helpers/fake.js";
 import type { SessionRuntime } from "../../src/tools/context.js";
 import type { Route } from "../../src/servers/routing.js";
 
-async function setup(env: Record<string, string> = {}) {
+async function setup(env: Record<string, string> = {}, serverId = "fake") {
   const root = await mkdtemp(join(tmpdir(), "base-lsp-mutations-"));
   await writeFile(join(root, "tsconfig.json"), "{}");
   const a = join(root, "a.ts"); const b = join(root, "b.ts");
   await writeFile(a, "const ERROR = alpha;\n"); await writeFile(b, "console.log(alpha);\n");
-  const server = fakeServer(env);
+  const server = { ...fakeServer(env), id: serverId };
   const config = { ...defaultConfig(), servers: { fake: server } };
   const loaded = { config, generation: 1, userPath: join(root, "user.json"), warnings: [], trusted: true, authorized: true };
   const manager = new ClientManager(loaded);
@@ -48,14 +48,47 @@ describe("code actions", () => {
     } finally { await manager.shutdown(); }
   });
 
+  it("isolates malformed candidates instead of hiding valid actions", async () => {
+    const { a, manager, codeActions } = await setup({ FAKE_LSP_ACTION_MODE: "mixed-malformed" });
+    try {
+      const result = await execute(codeActions, { path: a, line: 1, symbol: "ERROR" });
+      expect(result.details.status).toBe("partial");
+      expect(result.details.actions).toHaveLength(2);
+      expect(result.details.actions[0]).toMatchObject({ title: "Fix ERROR", supported: true });
+      expect(result.details.actions[1]).toMatchObject({ title: "Malformed fix", supported: false });
+      expect(result.details.actions[1].normalizationError).toMatch(/UTF-16 character exceeds line length/);
+    } finally { await manager.shutdown(); }
+  });
+
+  it("applies TypeScript edit actions whose wrapper command is provably redundant", async () => {
+    const { a, manager, codeActions } = await setup({ FAKE_LSP_ACTION_MODE: "typescript-redundant", FAKE_LSP_SERVER_NAME: "typescript-language-server" }, "typescript");
+    try {
+      const preview = await execute(codeActions, { path: a, line: 1, symbol: "ERROR", title: "Fix ERROR" });
+      expect(preview.details.actions[0]).toMatchObject({ supported: true, commandDisposition: "redundant", commandExecuted: false });
+      const applied = await execute(codeActions, { path: a, line: 1, symbol: "ERROR", title: "Fix ERROR", actionId: preview.details.actionId, apply: true });
+      expect(applied.details.applied).toBe(true);
+      expect(await readFile(a, "utf8")).toContain("fixed");
+    } finally { await manager.shutdown(); }
+  });
+
+  it("rejects TypeScript wrapper commands that contain nested commands", async () => {
+    const { a, manager, codeActions } = await setup({ FAKE_LSP_ACTION_MODE: "typescript-nested", FAKE_LSP_SERVER_NAME: "typescript-language-server" }, "typescript");
+    try {
+      const result = await execute(codeActions, { path: a, line: 1, symbol: "ERROR", title: "Fix ERROR" });
+      expect(result.details.actions[0]).toMatchObject({ supported: false, commandDisposition: "unsupported" });
+      expect(result.details.actions[0].reason).toContain("nested commands");
+    } finally { await manager.shutdown(); }
+  });
+
   it("never applies command-only, edit-plus-command, formatting, or resource actions", async () => {
     for (const [mode, reason] of [["command", "Command-only"], ["both", "both edit and command"], ["format", "Formatting"], ["resource", "Resource operations"]] as const) {
-      const { a, manager, codeActions } = await setup({ FAKE_LSP_ACTION_MODE: mode });
+      const { a, manager, codeActions, runtime } = await setup({ FAKE_LSP_ACTION_MODE: mode });
       try {
         const title = mode === "command" ? "Run unsafe command" : "Fix ERROR";
         const result = await execute(codeActions, { path: a, line: 1, symbol: "ERROR", title });
         expect(result.details.actions[0].supported).toBe(false);
         expect(result.details.actions[0].reason).toContain(reason);
+        expect(runtime.previewActions.has(result.details.actionId)).toBe(false);
       } finally { await manager.shutdown(); }
     }
   });

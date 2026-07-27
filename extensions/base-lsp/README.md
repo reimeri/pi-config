@@ -122,7 +122,7 @@ Per-file evidence states are:
 - `cancelled`;
 - `error`.
 
-Silence, timeout, an unmatched `unchanged` report, stale versioned publication, or an unversioned empty publication after a change is never converted to `clean`. Unversioned non-empty publications can be returned as `possiblyStale: true`.
+Silence, timeout, an unmatched `unchanged` report, stale versioned publication, or an unversioned empty publication after a change is never converted to `clean`. For TypeScript only, an initial post-`didOpen` empty publication may confirm a clean version-1 document after the catalog's bounded settling period; results identify this as `confirmation: "post_open_server_policy"`. Unversioned non-empty publications can be returned as `possiblyStale: true`.
 
 ### `lsp_navigation`
 
@@ -176,7 +176,7 @@ A uniquely selected edit-bearing preview returns `actionId`. Apply requires anot
 }
 ```
 
-Apply makes a fresh code-action request and requires exactly one identical response. Merely listing an ID does not authorize apply. Command-only actions are never executed. Actions containing both an edit and command, formatting actions, unsafe resource operations, and unsupported partial subsets are non-applicable.
+Apply makes a fresh code-action request and requires exactly one identical response. Merely listing an ID does not authorize apply. Commands are never executed. Command-only actions remain unsupported. Edit-plus-command actions are non-applicable except for the pinned TypeScript `_typescript.applyCodeActionCommand` wrapper when its payload proves that it has no nested commands; in that case the complete validated edit may be applied and the redundant wrapper is omitted. Formatting actions, unsafe resource operations, and unsupported partial subsets remain non-applicable. Malformed candidates are reported individually and do not hide other valid actions.
 
 ### `lsp_rename`
 
@@ -218,7 +218,7 @@ Normal filesystems do not provide true multi-file atomicity. The staging, queuei
 /lsp config
 ```
 
-Status shows command availability, active roots, and client state. Restart/stop affects only session clients; the next tool call starts a server lazily. Config output shows effective paths and redacted values, not environment values or server settings.
+Status shows command availability, active roots, initialized server name/version, normalized capabilities, and client state. Restart/stop affects only session clients; the next tool call starts a server lazily. Config output shows effective paths and redacted values, not environment values or server settings.
 
 ## Configuration
 
@@ -286,7 +286,9 @@ No server, watcher, or process starts in the extension factory or `session_start
 - **Wrong server/root:** pass explicit `server`/`root`, inspect project markers, then `/lsp restart <id>` after marker changes.
 - **TypeScript cannot find TypeScript:** install both `typescript-language-server` and `typescript`, or configure `initializationOptions.tsserver.path`.
 - **Timeout or incomplete navigation:** let initial indexing finish, increase the bounded request timeout in user config, or inspect `/lsp status` progress/stderr.
-- **Unconfirmed diagnostics:** the server did not provide affirmative evidence. Retry with `refresh: true`; do not interpret it as clean.
+- **Unconfirmed diagnostics:** the server did not provide affirmative evidence. Retry with `refresh: true`; do not interpret it as clean. TypeScript initial clean files use a bounded post-open server policy, while later unversioned empty publications remain provisional.
+- **Unsupported TypeScript declaration:** `typescript-language-server` does not advertise the LSP declaration method. Use an explicit definition request only when definition semantics are acceptable.
+- **Unavailable workspace servers:** implicit workspace scans summarize missing server/root groups while retaining per-file `unavailable` evidence and installation hints in structured details.
 - **Stale diagnostics after external edits:** explicit requests reread authoritative disk content. Use `refresh: true` or restart a misbehaving server.
 - **Apply rejected:** content, version, identity, path, edit limits, or resource operations changed since preview. Preview again rather than bypassing the check.
 - **Untrusted:** trust the project and reload/restart the Pi session, or deliberately set the user-global override.

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { appendFileSync, readFileSync } from "node:fs";
 
 let buffer = Buffer.alloc(0);
 const documents = new Map();
@@ -45,14 +47,15 @@ function handleNotification(message) {
   if (message.method === "textDocument/didOpen") {
     const document = message.params.textDocument;
     documents.set(document.uri, { text: document.text, version: document.version });
-    if (process.env.FAKE_LSP_PUSH === "1") publish(document.uri);
+    if (process.env.FAKE_LSP_DID_OPEN_LOG) appendFileSync(process.env.FAKE_LSP_DID_OPEN_LOG, `${process.env.FAKE_LSP_INSTANCE ?? "fake"} ${Date.now()}\n`);
+    if (process.env.FAKE_LSP_PUSH === "1") void publish(document.uri);
   } else if (message.method === "textDocument/didChange") {
     const document = documents.get(message.params.textDocument.uri) ?? { text: "", version: 0 };
     const changes = message.params.contentChanges ?? [];
     if (changes.length) document.text = changes.at(-1).text;
     document.version = message.params.textDocument.version;
     documents.set(message.params.textDocument.uri, document);
-    if (process.env.FAKE_LSP_PUSH === "1") publish(message.params.textDocument.uri);
+    if (process.env.FAKE_LSP_PUSH === "1") void publish(message.params.textDocument.uri);
   } else if (message.method === "textDocument/didClose") documents.delete(message.params.textDocument.uri);
   else if (message.method === "exit" && process.env.FAKE_LSP_IGNORE_EXIT !== "1") { descendant?.kill(); process.exit(0); }
 }
@@ -65,10 +68,10 @@ async function resultFor(method, params) {
         positionEncoding: process.env.FAKE_LSP_ENCODING ?? "utf-16",
         textDocumentSync: { openClose: true, change: 2, save: { includeText: true } },
         diagnosticProvider: { identifier: "fake", interFileDependencies: true, workspaceDiagnostics: true },
-        declarationProvider: true, definitionProvider: true, typeDefinitionProvider: true, implementationProvider: true, referencesProvider: true, hoverProvider: true,
+        ...(process.env.FAKE_LSP_NO_DECLARATION === "1" ? {} : { declarationProvider: true }), definitionProvider: true, typeDefinitionProvider: true, implementationProvider: true, referencesProvider: true, hoverProvider: true,
         documentSymbolProvider: true, workspaceSymbolProvider: { resolveProvider: true }, callHierarchyProvider: true,
         codeActionProvider: { resolveProvider: true }, renameProvider: { prepareProvider: true },
-      }, serverInfo: { name: "base-lsp-fake", version: "1" } };
+      }, serverInfo: { name: process.env.FAKE_LSP_SERVER_NAME ?? "base-lsp-fake", version: "1" } };
     case "shutdown": if (process.env.FAKE_LSP_HANG_SHUTDOWN === "1") return new Promise(() => {}); return null;
     case "textDocument/diagnostic": return documentDiagnostic(params.textDocument.uri, params.previousResultId);
     case "workspace/diagnostic": return workspaceDiagnostic(params);
@@ -90,11 +93,18 @@ async function resultFor(method, params) {
     case "textDocument/codeAction": {
       const mode = process.env.FAKE_LSP_ACTION_MODE;
       if (mode === "command") return [{ title: "Run unsafe command", command: "fake.command", arguments: [] }];
+      if (mode === "mixed-malformed") return [
+        { title: "Fix ERROR", kind: "quickfix", data: { uri: params.textDocument.uri, mode: "valid" } },
+        { title: "Malformed fix", kind: "quickfix", data: { uri: params.textDocument.uri, mode: "malformed" } },
+      ];
       return [{ title: "Fix ERROR", kind: mode === "format" ? "source.format.fake" : "quickfix", data: { uri: params.textDocument.uri, mode } }];
     }
     case "codeAction/resolve": {
       const action = { ...params, edit: replacementEdit(params.data.uri, "ERROR", "fixed") };
+      if (params.data.mode === "malformed") action.edit = { documentChanges: [{ textDocument: { uri: params.data.uri, version: documents.get(params.data.uri)?.version ?? 1 }, edits: [{ range: range(0, 999, 0, 999), newText: "broken" }] }] };
       if (params.data.mode === "both") action.command = { title: "Follow-up", command: "fake.command" };
+      if (params.data.mode === "typescript-redundant") action.command = { title: "", command: "_typescript.applyCodeActionCommand", arguments: [{ action: { fixName: "fake", description: "Fix ERROR", changes: replacementCommandChanges(params.data.uri, "ERROR", "fixed") }, diagnostic: {}, documentUri: params.data.uri }] };
+      if (params.data.mode === "typescript-nested") action.command = { title: "", command: "_typescript.applyCodeActionCommand", arguments: [{ action: { fixName: "fake", description: "Fix ERROR", changes: replacementCommandChanges(params.data.uri, "ERROR", "fixed"), commands: [{ type: "install package" }] }, diagnostic: {}, documentUri: params.data.uri }] };
       if (params.data.mode === "resource") action.edit.documentChanges.push({ kind: "create", uri: new URL("created.ts", params.data.uri).href });
       return action;
     }
@@ -122,16 +132,39 @@ function documentDiagnostic(uri, previousResultId) {
   const items = offset < 0 ? [] : Array.from({ length: count }, (_, index) => ({ range: offsetRange(document.text, offset, 5), severity: 1, source: "fake", message: `fake error ${index + 1}` }));
   return { kind: "full", resultId, items };
 }
-function publish(uri) {
+async function publish(uri) {
+  const barrierCount = Number(process.env.FAKE_LSP_DID_OPEN_BARRIER_COUNT ?? 0);
+  if (barrierCount > 0 && process.env.FAKE_LSP_DID_OPEN_LOG && !await waitForOpenBarrier(process.env.FAKE_LSP_DID_OPEN_LOG, barrierCount)) return;
   const document = documents.get(uri);
   const report = documentDiagnostic(uri);
   const version = process.env.FAKE_LSP_UNVERSIONED === "1" ? undefined : document.version + Number(process.env.FAKE_LSP_PUSH_VERSION_OFFSET ?? 0);
   setTimeout(() => send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, ...(version === undefined ? {} : { version }), diagnostics: report.items } }), Number(process.env.FAKE_LSP_PUSH_DELAY_MS ?? 0));
+  const secondDelay = Number(process.env.FAKE_LSP_PUSH_SECOND_ERROR_DELAY_MS ?? 0);
+  if (secondDelay > 0) setTimeout(() => send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri, diagnostics: [{ range: range(0, 0, 0, 1), severity: 1, source: "fake", message: "delayed semantic error" }] } }), secondDelay);
+}
+async function waitForOpenBarrier(path, count) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    let entries = 0;
+    try { entries = readFileSync(path, "utf8").trim().split("\n").filter(Boolean).length; } catch { /* log not created yet */ }
+    if (entries >= count) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return false;
 }
 function replacementEdit(uri, oldText, newText) {
   const document = documents.get(uri) ?? { text: "", version: 0 };
   const offset = document.text.indexOf(oldText);
   return { documentChanges: offset < 0 ? [] : [{ textDocument: { uri, version: document.version }, edits: [{ range: offsetRange(document.text, offset, oldText.length), newText }] }] };
+}
+function replacementCommandChanges(uri, oldText, newText) {
+  const document = documents.get(uri) ?? { text: "", version: 0 };
+  const offset = document.text.indexOf(oldText);
+  if (offset < 0) return [];
+  const before = document.text.slice(0, offset).split(/\r?\n/);
+  const start = { line: before.length, offset: before.at(-1).length + 1 };
+  const end = { line: start.line, offset: start.offset + oldText.length };
+  return [{ fileName: fileURLToPath(uri), textChanges: [{ start, end, newText }] }];
 }
 function renameEdit(oldName, newName) {
   return { documentChanges: [...documents].map(([uri, document]) => ({ textDocument: { uri, version: document.version }, edits: occurrences(document.text, oldName).map((offset) => ({ range: offsetRange(document.text, offset, oldName.length), newText: newName })) })).filter((change) => change.edits.length) };

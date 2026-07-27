@@ -3,17 +3,20 @@ import type { Diagnostic, DocumentDiagnosticReport, PublishDiagnosticsParams, Wo
 import type { DocumentSnapshot } from "../runtime/document-store.js";
 import { CancelledError, TimeoutError, throwIfAborted } from "../util/async.js";
 import { sanitizeText } from "../util/text.js";
+import { isTypeScriptLanguageServer } from "../servers/implementation.js";
 
 export type DiagnosticEvidenceState = "diagnostics" | "clean" | "unconfirmed" | "timed_out" | "unavailable" | "cancelled" | "error";
-export interface DiagnosticEvidence { state: DiagnosticEvidenceState; diagnostics: Diagnostic[]; omittedDiagnostics?: number; version?: number; possiblyStale?: boolean; resultId?: string; message?: string }
+export interface DiagnosticEvidence { state: DiagnosticEvidenceState; diagnostics: Diagnostic[]; omittedDiagnostics?: number; version?: number; possiblyStale?: boolean; resultId?: string; message?: string; confirmation?: "versioned" | "post_open_server_policy" }
 export interface WorkspaceDiagnosticEvidence { evidence: Map<string, DiagnosticEvidence>; omittedReports: number }
+export type PushCheckpoint = number;
 
-interface BoundedPublishDiagnostics extends PublishDiagnosticsParams { omittedDiagnostics?: number }
+interface BoundedPublishDiagnostics extends PublishDiagnosticsParams { omittedDiagnostics?: number; sequence: number; receivedAt: number }
 interface ClientDiagnosticState {
   pushes: Map<string, BoundedPublishDiagnostics>;
   waiters: Map<string, Set<(params: BoundedPublishDiagnostics) => void>>;
   reports: Map<string, { resultId: string; diagnostics: Diagnostic[]; contentHash: string }>;
   confirmed: Map<string, DiagnosticEvidence>;
+  sequence: number;
   dispose: () => void;
 }
 
@@ -23,6 +26,7 @@ export class DiagnosticService {
   private readonly states = new Set<ClientDiagnosticState>();
 
   observe(client: LspClient): void { this.ensure(client); }
+  checkpoint(client: LspClient): PushCheckpoint { return this.ensure(client).sequence; }
 
   invalidate(client?: LspClient, uri?: string): void {
     if (!client) {
@@ -37,7 +41,7 @@ export class DiagnosticService {
     for (const key of [...state.confirmed.keys()]) if (key.startsWith(`${uri}\0`)) state.confirmed.delete(key);
   }
 
-  async check(client: LspClient, snapshot: DocumentSnapshot, waitMs: number, refresh: boolean, signal?: AbortSignal): Promise<DiagnosticEvidence> {
+  async check(client: LspClient, snapshot: DocumentSnapshot, waitMs: number, refresh: boolean, signal?: AbortSignal, checkpoint?: PushCheckpoint): Promise<DiagnosticEvidence> {
     throwIfAborted(signal);
     const state = this.ensure(client);
     const cacheKey = `${snapshot.uri}\0${snapshot.contentHash}`;
@@ -51,7 +55,10 @@ export class DiagnosticService {
     try {
       let evidence: DiagnosticEvidence;
       if (client.capabilities?.diagnostics.pull) evidence = await this.pull(client, snapshot, waitMs, signal);
-      else evidence = await this.waitForPush(state, snapshot, waitMs, signal, client.server.diagnosticPolicy?.settleMs ?? 50);
+      else {
+        const initialEmptyPolicy = isTypeScriptLanguageServer(client.server, client.serverInfo) && client.server.diagnosticPolicy?.acceptUnversionedEmptyAfterOpen === true;
+        evidence = await this.waitForPush(state, snapshot, waitMs, signal, client.server.diagnosticPolicy?.settleMs ?? 50, client.server.diagnosticPolicy?.pushFirstMs ?? waitMs, initialEmptyPolicy, checkpoint);
+      }
       if ((evidence.state === "clean" || evidence.state === "diagnostics") && !evidence.possiblyStale) this.cacheConfirmed(state, snapshot, evidence);
       return evidence;
     } catch (error) {
@@ -137,7 +144,7 @@ export class DiagnosticService {
     const omittedDiagnostics = Math.max(0, rawDiagnostics.length - diagnostics.length);
     if (report.resultId) this.cacheReport(state, reportKey, { resultId: report.resultId, diagnostics: structuredClone(diagnostics), contentHash: snapshot.contentHash });
     if (!diagnostics.length && (client.server.diagnosticPolicy?.emptyPullGraceMs ?? 0) > 0) {
-      const pushed = await this.waitForPush(this.ensure(client), snapshot, Math.min(waitMs, client.server.diagnosticPolicy!.emptyPullGraceMs!), signal, client.server.diagnosticPolicy?.settleMs ?? 50).catch(() => undefined);
+      const pushed = await this.waitForPush(this.ensure(client), snapshot, Math.min(waitMs, client.server.diagnosticPolicy!.emptyPullGraceMs!), signal, client.server.diagnosticPolicy?.settleMs ?? 50, client.server.diagnosticPolicy?.pushFirstMs ?? waitMs, false).catch(() => undefined);
       if (pushed?.state === "diagnostics") return pushed;
     }
     return { state: rawDiagnostics.length ? "diagnostics" : "clean", diagnostics, ...(omittedDiagnostics ? { omittedDiagnostics } : {}), ...(report.resultId ? { resultId: report.resultId } : {}) };
@@ -155,33 +162,53 @@ export class DiagnosticService {
     state.confirmed.set(`${snapshot.uri}\0${snapshot.contentHash}`, structuredClone(evidence));
   }
 
-  private waitForPush(state: ClientDiagnosticState, snapshot: DocumentSnapshot, waitMs: number, signal: AbortSignal | undefined, settleMs: number): Promise<DiagnosticEvidence> {
+  private waitForPush(state: ClientDiagnosticState, snapshot: DocumentSnapshot, waitMs: number, signal: AbortSignal | undefined, settleMs: number, pushFirstMs: number, acceptUnversionedEmptyAfterOpen: boolean, checkpoint?: PushCheckpoint): Promise<DiagnosticEvidence> {
+    const relevant = (params: BoundedPublishDiagnostics): boolean => checkpoint === undefined || params.sequence > checkpoint;
+    const provisionalEmpty = (params: BoundedPublishDiagnostics): boolean => params.version === undefined && params.diagnostics.length === 0;
     const current = state.pushes.get(snapshot.uri);
-    const converted = current ? evidenceFromPush(current, snapshot, this.maxDiagnostics) : undefined;
+    const converted = current && relevant(current) ? evidenceFromPush(current, snapshot, this.maxDiagnostics) : undefined;
     if (converted && converted.state !== "unconfirmed") return Promise.resolve(converted);
     return new Promise((resolve, reject) => {
+      const started = Date.now();
       let deadlineTimer: NodeJS.Timeout | undefined;
       let settleTimer: NodeJS.Timeout | undefined;
-      let pending: BoundedPublishDiagnostics | undefined;
+      let pending = current && relevant(current) && provisionalEmpty(current) ? current : undefined;
       const listeners = state.waiters.get(snapshot.uri) ?? new Set<(params: BoundedPublishDiagnostics) => void>();
       state.waiters.set(snapshot.uri, listeners);
+      const deadlineAt = started + waitMs;
       const finish = (value?: BoundedPublishDiagnostics): void => {
+        const latest = value ?? pending;
+        const policyCandidate = Boolean(latest && acceptUnversionedEmptyAfterOpen && snapshot.syncState === "opened" && checkpoint !== undefined && latest.sequence > checkpoint && provisionalEmpty(latest));
+        const policyReadyAt = latest ? Math.max(started + pushFirstMs, latest.receivedAt + settleMs) : Number.POSITIVE_INFINITY;
+        const now = Date.now();
+        if (policyCandidate && now < policyReadyAt && policyReadyAt <= deadlineAt) {
+          if (settleTimer) clearTimeout(settleTimer);
+          settleTimer = setTimeout(() => finish(latest), Math.max(1, policyReadyAt - now)); settleTimer.unref?.();
+          return;
+        }
         cleanup();
-        const latest = value ?? pending ?? state.pushes.get(snapshot.uri);
-        resolve(latest ? evidenceFromPush(latest, snapshot, this.maxDiagnostics) : { state: "unconfirmed", diagnostics: [], message: "Push server was silent" });
+        const acceptEmpty = policyCandidate && now >= policyReadyAt;
+        resolve(latest ? evidenceFromPush(latest, snapshot, this.maxDiagnostics, acceptEmpty) : { state: "unconfirmed", diagnostics: [], message: "Push server was silent" });
       };
-      const listener = (params: BoundedPublishDiagnostics): void => {
-        const evidence = evidenceFromPush(params, snapshot, this.maxDiagnostics);
-        if (evidence.state === "unconfirmed") return;
+      const schedule = (params: BoundedPublishDiagnostics, isProvisional: boolean): void => {
         pending = params;
         if (settleTimer) clearTimeout(settleTimer);
-        if (settleMs <= 0) finish(params);
-        else { settleTimer = setTimeout(() => finish(pending), Math.min(settleMs, waitMs)); settleTimer.unref?.(); }
+        const firstGrace = isProvisional ? Math.max(0, Math.min(pushFirstMs, waitMs) - (Date.now() - started)) : 0;
+        const delay = Math.min(waitMs, Math.max(settleMs, firstGrace));
+        if (delay <= 0) finish(params);
+        else { settleTimer = setTimeout(() => finish(pending), delay); settleTimer.unref?.(); }
+      };
+      const listener = (params: BoundedPublishDiagnostics): void => {
+        if (!relevant(params)) return;
+        const evidence = evidenceFromPush(params, snapshot, this.maxDiagnostics);
+        if (evidence.state === "unconfirmed" && !provisionalEmpty(params)) return;
+        schedule(params, provisionalEmpty(params));
       };
       const abort = (): void => { cleanup(); reject(new CancelledError()); };
       const cleanup = (): void => { if (deadlineTimer) clearTimeout(deadlineTimer); if (settleTimer) clearTimeout(settleTimer); listeners.delete(listener); signal?.removeEventListener("abort", abort); };
       listeners.add(listener);
       deadlineTimer = setTimeout(() => finish(), waitMs); deadlineTimer.unref?.();
+      if (pending) schedule(pending, true);
       if (signal?.aborted) abort(); else signal?.addEventListener("abort", abort, { once: true });
     });
   }
@@ -196,7 +223,9 @@ export class DiagnosticService {
     const disposeDiagnostics = client.onDiagnostics((params) => {
       if (params.uri.length > 8_192) return;
       const diagnostics = params.diagnostics.slice(0, this.maxDiagnostics).map(boundDiagnostic);
-      const bounded: BoundedPublishDiagnostics = { uri: params.uri, ...(params.version !== undefined ? { version: params.version } : {}), diagnostics, ...(params.diagnostics.length > diagnostics.length ? { omittedDiagnostics: params.diagnostics.length - diagnostics.length } : {}) };
+      state.sequence += 1;
+      const bounded: BoundedPublishDiagnostics = { uri: params.uri, ...(params.version !== undefined ? { version: params.version } : {}), diagnostics, sequence: state.sequence, receivedAt: Date.now(), ...(params.diagnostics.length > diagnostics.length ? { omittedDiagnostics: params.diagnostics.length - diagnostics.length } : {}) };
+      for (const key of [...confirmed.keys()]) if (key.startsWith(`${params.uri}\0`)) confirmed.delete(key);
       if (!pushes.has(params.uri) && pushes.size >= this.maxCachedUris) { const oldest = pushes.keys().next().value as string | undefined; if (oldest) pushes.delete(oldest); }
       pushes.delete(params.uri); pushes.set(params.uri, bounded);
       for (const waiter of waiters.get(params.uri) ?? []) waiter(bounded);
@@ -205,7 +234,7 @@ export class DiagnosticService {
     let disposed = false;
     let state!: ClientDiagnosticState;
     const disposeStop = client.onStop(() => state.dispose());
-    state = { pushes, waiters, reports, confirmed, dispose: () => {
+    state = { pushes, waiters, reports, confirmed, sequence: 0, dispose: () => {
       if (disposed) return;
       disposed = true;
       disposeDiagnostics(); disposeRefresh(); disposeStop();
@@ -218,13 +247,16 @@ export class DiagnosticService {
   }
 }
 
-function evidenceFromPush(params: BoundedPublishDiagnostics, snapshot: DocumentSnapshot, maxDiagnostics: number): DiagnosticEvidence {
+function evidenceFromPush(params: BoundedPublishDiagnostics, snapshot: DocumentSnapshot, maxDiagnostics: number, acceptUnversionedEmpty = false): DiagnosticEvidence {
   if (params.version !== undefined && params.version < snapshot.version) return { state: "unconfirmed", diagnostics: [], message: "Only stale push diagnostics are available" };
   if (params.version !== undefined && params.version > snapshot.version) return { state: "unconfirmed", diagnostics: [], message: "Push diagnostics belong to a newer document version" };
-  if (params.version === undefined && params.diagnostics.length === 0) return { state: "unconfirmed", diagnostics: [], possiblyStale: true, message: "Unversioned empty publication is provisional" };
+  if (params.version === undefined && params.diagnostics.length === 0) {
+    if (acceptUnversionedEmpty) return { state: "clean", diagnostics: [], confirmation: "post_open_server_policy", message: "Clean after a post-open TypeScript diagnostic settling period" };
+    return { state: "unconfirmed", diagnostics: [], possiblyStale: true, message: "Unversioned empty publication is provisional" };
+  }
   const diagnostics = params.diagnostics.slice(0, maxDiagnostics);
   const omittedDiagnostics = (params.omittedDiagnostics ?? 0) + Math.max(0, params.diagnostics.length - diagnostics.length);
-  return { state: params.diagnostics.length || omittedDiagnostics ? "diagnostics" : "clean", diagnostics, ...(omittedDiagnostics ? { omittedDiagnostics } : {}), ...(params.version !== undefined ? { version: params.version } : { possiblyStale: true }) };
+  return { state: params.diagnostics.length || omittedDiagnostics ? "diagnostics" : "clean", diagnostics, ...(omittedDiagnostics ? { omittedDiagnostics } : {}), ...(params.version !== undefined ? { version: params.version, confirmation: "versioned" as const } : { possiblyStale: true }) };
 }
 
 function boundDiagnostic(diagnostic: Diagnostic): Diagnostic {

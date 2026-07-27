@@ -17,7 +17,7 @@ export interface OpenDocument {
   mtimeMs: number;
   lastUse: number;
 }
-export interface DocumentSnapshot extends OpenDocument {}
+export interface DocumentSnapshot extends OpenDocument { syncState: "opened" | "changed" | "unchanged" }
 export type Notify = (method: string, params?: unknown) => Promise<void>;
 
 export class DocumentStore {
@@ -28,9 +28,9 @@ export class DocumentStore {
   private readonly pinWaiters = new Set<() => void>();
   constructor(private readonly server: ServerDefinition, private readonly capabilities: NormalizedCapabilities, private readonly notify: Notify, private readonly maxOpen: number, private readonly maxFileBytes: number) {}
 
-  list(): OpenDocument[] { return [...this.documents.values()]; }
-  get(path: string): OpenDocument | undefined { return this.documents.get(path); }
-  getByUri(uri: string): OpenDocument | undefined { return [...this.documents.values()].find((document) => document.uri === uri); }
+  list(): OpenDocument[] { return [...this.documents.values()].map((document) => ({ ...document })); }
+  get(path: string): OpenDocument | undefined { const document = this.documents.get(path); return document ? { ...document } : undefined; }
+  getByUri(uri: string): OpenDocument | undefined { const document = [...this.documents.values()].find((item) => item.uri === uri); return document ? { ...document } : undefined; }
 
   sync(path: string, signal?: AbortSignal): Promise<DocumentSnapshot> {
     return this.withPins([path], () => this.queues.run(path, () => this.syncUnlocked(path, signal)));
@@ -91,7 +91,7 @@ export class DocumentStore {
     throwIfAborted(signal);
     const hash = stableHash(text);
     const existing = this.documents.get(path);
-    if (existing && existing.contentHash === hash) { existing.mtimeMs = info.mtimeMs; existing.lastUse = Date.now(); return { ...existing }; }
+    if (existing && existing.contentHash === hash) { existing.mtimeMs = info.mtimeMs; existing.lastUse = Date.now(); return { ...existing, syncState: "unchanged" }; }
     if (this.capabilities.syncKind === 0) throw new Error(`Server ${this.server.id} does not support document synchronization`);
     const uri = filePathToUri(path);
     const languageId = languageIdFor(this.server, path) ?? "plaintext";
@@ -103,7 +103,7 @@ export class DocumentStore {
         try { if (this.capabilities.openClose) await this.notify("textDocument/didOpen", { textDocument: { uri, languageId, version: 1, text } }); }
         catch (error) { this.documents.delete(path); throw error; }
       });
-      return { ...document };
+      return { ...document, syncState: "opened" };
     }
     const version = existing.version + 1;
     const contentChanges = this.capabilities.syncKind === 2
@@ -111,7 +111,7 @@ export class DocumentStore {
       : [{ text }];
     await this.notify("textDocument/didChange", { textDocument: { uri, version }, contentChanges });
     Object.assign(existing, { version, contentHash: hash, text, mtimeMs: info.mtimeMs, lastUse: Date.now() });
-    return { ...existing };
+    return { ...existing, syncState: "changed" };
   }
   private async notifySave(document: OpenDocument): Promise<void> {
     if (!this.capabilities.save) return;

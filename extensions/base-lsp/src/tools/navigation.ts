@@ -9,6 +9,7 @@ import { sanitizeText, stableHash } from "../util/text.js";
 import { routeFile, type Route } from "../servers/routing.js";
 import { resolveExplicitRoot, resolveInputPath } from "../workspace/boundary.js";
 import type { NormalizedCapabilities, PositionEncoding } from "../protocol/types.js";
+import { isTypeScriptLanguageServer } from "../servers/implementation.js";
 
 interface NormalizedSymbol {
   name: string;
@@ -48,7 +49,13 @@ export function registerNavigationTool(pi: ExtensionAPI, getRuntime: RuntimeGett
         }, signal);
         try {
         const capabilities = source.client.capabilities!;
-        if (!supports(capabilities, params.operation)) return envelope(`${source.route.server.id} does not support ${params.operation}.`, { ...baseDetails(params.operation, "unsupported", started), server: source.route.server.id, root: source.route.root });
+        if (!supports(capabilities, params.operation)) {
+          const typeScriptDeclaration = isTypeScriptLanguageServer(source.route.server, source.client.serverInfo) && params.operation === "declaration";
+          const message = typeScriptDeclaration
+            ? "typescript-language-server does not advertise declaration support. Use an explicit definition request when definition semantics are acceptable."
+            : `${source.route.server.id} does not support ${params.operation}.`;
+          return envelope(message, { ...baseDetails(params.operation, "unsupported", started), server: source.route.server.id, root: source.route.root, capabilityAdvertised: false, ...(source.client.serverInfo ? { serverInfo: source.client.serverInfo } : {}), ...(typeScriptDeclaration ? { suggestedOperation: "definition" } : {}) });
+        }
         const symbolOperation = params.operation === "document_symbols";
         const limit = Math.min(params.limit ?? (symbolOperation ? runtime.loaded.config.limits.maxSymbols : runtime.loaded.config.limits.maxLocations), symbolOperation ? runtime.loaded.config.limits.maxSymbols : runtime.loaded.config.limits.maxLocations);
 

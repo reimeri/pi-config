@@ -13,13 +13,13 @@ import { fakeServer } from "../helpers/fake.js";
 import type { SessionRuntime } from "../../src/tools/context.js";
 import { normalizeLocations } from "../../src/protocol/locations.js";
 
-async function setup() {
+async function setup(env: Record<string, string> = {}, serverId = "fake") {
   const root = await mkdtemp(join(tmpdir(), "base-lsp-navigation-"));
   await writeFile(join(root, "tsconfig.json"), "{}");
   const path = join(root, "a.ts");
   await writeFile(path, "const alpha = 1;\nconsole.log(alpha);\n");
-  const server = fakeServer();
-  const config = { ...defaultConfig(), servers: { fake: server } };
+  const server = { ...fakeServer(env), id: serverId };
+  const config = { ...defaultConfig(), servers: { [serverId]: server } };
   const loaded = { config, generation: 1, userPath: join(root, "user.json"), warnings: [], trusted: true, authorized: true };
   const manager = new ClientManager(loaded);
   const runtime: SessionRuntime = { cwd: root, boundary: root, loaded, registry: new ServerRegistry(config.servers), roots: new RootDetector(1), manager, diagnostics: new DiagnosticService(), changed: new Set(), previewActions: new Set(), previewRenames: new Set() };
@@ -45,6 +45,15 @@ describe("semantic navigation tool", () => {
       }
       const hover = await execute(tool, { operation: "hover", path, line: 1, symbol: "alpha" });
       expect(hover.details.hover).toContain("fake hover");
+    } finally { await manager.shutdown(); }
+  });
+
+  it("explains TypeScript declaration capability gaps without silently falling back", async () => {
+    const { path, manager, tool } = await setup({ FAKE_LSP_NO_DECLARATION: "1", FAKE_LSP_SERVER_NAME: "typescript-language-server" }, "typescript");
+    try {
+      const result = await execute(tool, { operation: "declaration", path, line: 1, symbol: "alpha" });
+      expect(result.details).toMatchObject({ status: "unsupported", capabilityAdvertised: false, suggestedOperation: "definition", serverInfo: { name: "typescript-language-server", version: "1" } });
+      expect(result.content[0].text).toContain("does not advertise declaration support");
     } finally { await manager.shutdown(); }
   });
 

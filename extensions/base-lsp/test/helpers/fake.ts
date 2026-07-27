@@ -20,8 +20,8 @@ export function fakeServer(env: Record<string, string> = {}): ServerDefinition {
   };
 }
 
-export async function fakeClient(root: string, env: Record<string, string> = {}): Promise<LspClient> {
-  const server = fakeServer(env);
+export async function fakeClient(root: string, env: Record<string, string> = {}, overrides: Partial<ServerDefinition> = {}): Promise<LspClient> {
+  const server = { ...fakeServer(env), ...overrides };
   const command = await resolveServerCommand(server);
   if (!command) throw new Error("Unable to resolve fake server command");
   return new LspClient(server, root, command, { ...DEFAULT_LIMITS, initializeTimeoutMs: 3_000, requestTimeoutMs: 2_000, shutdownTimeoutMs: 100 });

@@ -10,6 +10,7 @@ import { BUILTIN_SERVERS } from "../../src/servers/catalog.js";
 import { defaultConfig } from "../../src/config/defaults.js";
 import { mergeConfig } from "../../src/config/loader.js";
 import { validateConfigFile } from "../../src/config/schema.js";
+import { isTypeScriptLanguageServer } from "../../src/servers/implementation.js";
 
 async function temp(): Promise<string> { return mkdtemp(join(tmpdir(), "base-lsp-")); }
 
@@ -39,6 +40,15 @@ describe("boundary, roots and routing", () => {
   });
 });
 
+describe("server implementation identity", () => {
+  it("prefers explicit server information over command-name fallback", () => {
+    const server = BUILTIN_SERVERS.typescript!;
+    expect(isTypeScriptLanguageServer(server)).toBe(true);
+    expect(isTypeScriptLanguageServer(server, { name: "typescript-language-server", version: "5" })).toBe(true);
+    expect(isTypeScriptLanguageServer(server, { name: "different-server", version: "1" })).toBe(false);
+  });
+});
+
 describe("configuration merge", () => {
   it("replaces arrays, deep merges objects, and clears null values", () => {
     const merged = mergeConfig(defaultConfig(), { ignore: ["generated/**"], serverOverrides: { typescript: { command: ["custom-ts", "--stdio"], diagnosticPolicy: { settleMs: 10 }, settings: null } } });
@@ -47,5 +57,6 @@ describe("configuration merge", () => {
   it("forbids project-level untrusted execution policy and malformed commands", () => {
     expect(() => validateConfigFile({ allowUntrustedProjects: true }, "project.json", false)).toThrow(/user config/);
     expect(() => validateConfigFile({ servers: { bad: { command: "shell source" } } }, "user.json", true)).toThrow(/non-empty string array/);
+    expect(() => mergeConfig(defaultConfig(), { serverOverrides: { typescript: { diagnosticPolicy: { pushFirstMs: -1 } } } })).toThrow(/pushFirstMs/);
   });
 });

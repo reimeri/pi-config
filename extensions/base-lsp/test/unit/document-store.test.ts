@@ -22,6 +22,16 @@ describe("document synchronization ordering", () => {
     expect(store.list()).toHaveLength(1);
   });
 
+  it("returns immutable document snapshots from registry accessors", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-snapshots-")); const path = join(root, "a.ts"); await writeFile(path, "const original = 1;\n");
+    const store = new DocumentStore(fakeServer(), capabilities, async () => undefined, 2, 1024 * 1024);
+    await store.sync(path);
+    const listed = store.list(); listed[0]!.text = "mutated"; listed[0]!.version = 99;
+    expect(store.get(path)).toMatchObject({ text: "const original = 1;\n", version: 1 });
+    const byUri = store.getByUri(store.get(path)!.uri)!; byUri.text = "also mutated";
+    expect(store.get(path)?.text).toBe("const original = 1;\n");
+  });
+
   it("pins every document in a multi-document request against LRU eviction", async () => {
     const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-pins-"));
     const paths = ["a.ts", "b.ts", "c.ts"].map((name) => join(root, name));

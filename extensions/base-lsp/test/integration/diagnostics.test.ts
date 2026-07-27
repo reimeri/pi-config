@@ -107,6 +107,54 @@ describe("truthful diagnostics", () => {
     } finally { await push.shutdown(); }
   });
 
+  it("confirms only an initial post-open unversioned empty under an explicit server policy", async () => {
+    const { root, path } = await fixture("const value = 1;\n");
+    const client = await fakeClient(root, { FAKE_LSP_PUSH: "1", FAKE_LSP_UNVERSIONED: "1", FAKE_LSP_SERVER_NAME: "typescript-language-server" }, { id: "typescript", diagnosticPolicy: { pushFirstMs: 20, settleMs: 5, acceptUnversionedEmptyAfterOpen: true } });
+    const service = new DiagnosticService();
+    try {
+      await client.start();
+      client.capabilities!.diagnostics = { pull: false, workspace: false };
+      service.observe(client);
+      const checkpoint = service.checkpoint(client);
+      const snapshot = await client.documents!.sync(path);
+      const initial = await service.check(client, snapshot, 100, true, undefined, checkpoint);
+      expect(initial).toMatchObject({ state: "clean", confirmation: "post_open_server_policy" });
+
+      await writeFile(path, "const changed = 2;\n");
+      const changedCheckpoint = service.checkpoint(client);
+      const changed = await client.documents!.sync(path);
+      const afterChange = await service.check(client, changed, 100, true, undefined, changedCheckpoint);
+      expect(afterChange.state).toBe("unconfirmed");
+    } finally { await client.shutdown(); }
+  });
+
+  it("does not accept an initial empty before the full policy grace", async () => {
+    const { root, path } = await fixture("const value = 1;\n");
+    const client = await fakeClient(root, { FAKE_LSP_PUSH: "1", FAKE_LSP_UNVERSIONED: "1", FAKE_LSP_SERVER_NAME: "typescript-language-server" }, { id: "typescript", diagnosticPolicy: { pushFirstMs: 100, settleMs: 5, acceptUnversionedEmptyAfterOpen: true } });
+    const service = new DiagnosticService();
+    try {
+      await client.start(); client.capabilities!.diagnostics = { pull: false, workspace: false }; service.observe(client);
+      const checkpoint = service.checkpoint(client); const snapshot = await client.documents!.sync(path);
+      const result = await service.check(client, snapshot, 20, true, undefined, checkpoint);
+      expect(result.state).toBe("unconfirmed");
+    } finally { await client.shutdown(); }
+  });
+
+  it("invalidates cached initial clean evidence when a later publication adds findings", async () => {
+    const { root, path } = await fixture("const value = 1;\n");
+    const client = await fakeClient(root, { FAKE_LSP_PUSH: "1", FAKE_LSP_UNVERSIONED: "1", FAKE_LSP_SERVER_NAME: "typescript-language-server", FAKE_LSP_PUSH_SECOND_ERROR_DELAY_MS: "60" }, { id: "typescript", diagnosticPolicy: { pushFirstMs: 20, settleMs: 5, acceptUnversionedEmptyAfterOpen: true } });
+    const service = new DiagnosticService();
+    try {
+      await client.start(); client.capabilities!.diagnostics = { pull: false, workspace: false }; service.observe(client);
+      const checkpoint = service.checkpoint(client); const snapshot = await client.documents!.sync(path);
+      expect((await service.check(client, snapshot, 40, true, undefined, checkpoint)).state).toBe("clean");
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const current = await service.check(client, { ...snapshot, syncState: "unchanged" }, 50, false);
+      expect(current.state).toBe("diagnostics");
+      expect(current.diagnostics[0]?.message).toContain("delayed semantic error");
+    } finally { await client.shutdown(); }
+  });
+
   it("returns unversioned non-empty push findings as possibly stale", async () => {
     const { root, path } = await fixture("const ERROR = 1;\n");
     const client = await fakeClient(root, { FAKE_LSP_PUSH: "1", FAKE_LSP_UNVERSIONED: "1" });

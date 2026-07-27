@@ -39,7 +39,9 @@ export default function registerBaseLsp(pi: ExtensionAPI): void {
       const lines = await Promise.all(definitions.map(async (definition) => {
         const client = active.find((item) => item.server === definition.id);
         const available = await resolveExecutable(definition.command[0]!);
-        const line = `${definition.id}: ${client?.state ?? (available ? "available (idle)" : "missing")} command=${definition.command.join(" ")}${client ? ` root=${client.root}` : ""}${!available && definition.installationHint ? `; ${definition.installationHint}` : ""}`;
+        const serverInfo = client?.serverInfo ? ` server=${client.serverInfo.name}${client.serverInfo.version ? `@${client.serverInfo.version}` : ""}` : "";
+        const capabilities = client?.capabilities ? ` capabilities=${enabledCapabilities(client.capabilities).join(",") || "none"}` : "";
+        const line = `${definition.id}: ${client?.state ?? (available ? "available (idle)" : "missing")} command=${definition.command.join(" ")}${client ? ` root=${client.root}` : ""}${serverInfo}${capabilities}${!available && definition.installationHint ? `; ${definition.installationHint}` : ""}`;
         return ctx.mode === "tui" ? ctx.ui.theme.fg(available ? "text" : "dim", line) : line;
       }));
       notify(ctx, lines.join("\n"), "info");
@@ -85,5 +87,12 @@ function withLspStatus(pi: ExtensionAPI): ExtensionAPI {
       };
     },
   }) as ExtensionAPI;
+}
+function enabledCapabilities(capabilities: NonNullable<ReturnType<ClientManager["status"]>[number]["capabilities"]>): string[] {
+  const names: string[] = [];
+  if (capabilities.diagnostics.pull) names.push("diagnostic-pull");
+  if (capabilities.diagnostics.workspace) names.push("diagnostic-workspace");
+  for (const key of ["declaration", "definition", "typeDefinition", "implementation", "references", "hover", "documentSymbols", "workspaceSymbols", "callHierarchy", "codeActions", "rename"] as const) if (capabilities[key]) names.push(key);
+  return names;
 }
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error"): void { if (ctx.hasUI) ctx.ui.notify(message, level); }

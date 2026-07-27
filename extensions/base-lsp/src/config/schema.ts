@@ -21,7 +21,7 @@ export interface ServerDefinition {
   settings?: unknown;
   workspaceConfiguration?: Record<string, unknown>;
   requestTimeoutMs?: number;
-  diagnosticPolicy?: { pushFirstMs?: number; settleMs?: number; emptyPullGraceMs?: number };
+  diagnosticPolicy?: { pushFirstMs?: number; settleMs?: number; emptyPullGraceMs?: number; acceptUnversionedEmptyAfterOpen?: boolean };
   capabilityOverrides?: Partial<NormalizedCapabilities>;
   installationHint?: string;
 }

@@ -27,8 +27,10 @@ export function registerRenameTool(pi: ExtensionAPI, getRuntime: RuntimeGetter):
             if (!prepared) return undefined;
           }
           const edit = await source.client.request<WorkspaceEdit | null>("textDocument/rename", { textDocument: { uri: source.snapshot.uri }, position: source.position, newName: params.newName }, signal);
-          const documentVersions = new Map(source.client.documents!.list().map((document) => [document.uri, document.version] as const));
-          const manifest = await normalizeWorkspaceEdit(edit, runtime.boundary, source.client.capabilities!.positionEncoding, runtime.loaded.config.limits, documentVersions);
+          const documents = source.client.documents!.list();
+          const documentVersions = new Map(documents.map((document) => [document.uri, document.version] as const));
+          const documentSnapshots = new Map(documents.map((document) => [document.uri, document] as const));
+          const manifest = await normalizeWorkspaceEdit(edit, runtime.boundary, source.client.capabilities!.positionEncoding, runtime.loaded.config.limits, documentVersions, documentSnapshots);
           const renameId = stableHash({ server: source.route.server.id, root: source.route.root, hash: source.snapshot.contentHash, newName: params.newName, edit: manifest.fingerprint });
           return { manifest, renameId };
         });

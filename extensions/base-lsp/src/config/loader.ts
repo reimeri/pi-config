@@ -118,6 +118,16 @@ function validateServer(server: Partial<ServerDefinition>, path: string): assert
   if (!Array.isArray(server.rootMarkers)) throw new Error(`${path}.rootMarkers must be an array`);
   if (!["none", "workspace", "file-directory"].includes(String(server.rootFallback))) throw new Error(`${path}.rootFallback is invalid`);
   if (!["primary", "diagnostic"].includes(String(server.role))) throw new Error(`${path}.role is invalid`);
+  if (server.diagnosticPolicy !== undefined) {
+    if (!isRecord(server.diagnosticPolicy)) throw new Error(`${path}.diagnosticPolicy must be an object`);
+    const allowed = new Set(["pushFirstMs", "settleMs", "emptyPullGraceMs", "acceptUnversionedEmptyAfterOpen"]);
+    for (const key of Object.keys(server.diagnosticPolicy)) if (!allowed.has(key)) throw new Error(`${path}.diagnosticPolicy.${key} is unknown`);
+    for (const key of ["pushFirstMs", "settleMs", "emptyPullGraceMs"] as const) {
+      const value = server.diagnosticPolicy[key];
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 0 || value > 120_000)) throw new Error(`${path}.diagnosticPolicy.${key} must be an integer from 0 to 120000`);
+    }
+    if (server.diagnosticPolicy.acceptUnversionedEmptyAfterOpen !== undefined && typeof server.diagnosticPolicy.acceptUnversionedEmptyAfterOpen !== "boolean") throw new Error(`${path}.diagnosticPolicy.acceptUnversionedEmptyAfterOpen must be boolean`);
+  }
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
 
