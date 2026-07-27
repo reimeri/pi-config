@@ -29,6 +29,7 @@ import {
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { LineStream } from "./line-stream.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -338,8 +339,6 @@ async function runSingleAgent(
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
-			let buffer = "";
-
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
 				let event: any;
@@ -377,11 +376,10 @@ async function runSingleAgent(
 				}
 			};
 
-			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(line);
+			const stdoutLines = new LineStream(processLine);
+
+			proc.stdout.on("data", (data: Buffer) => {
+				stdoutLines.write(data);
 			});
 
 			proc.stderr.on("data", (data) => {
@@ -389,7 +387,7 @@ async function runSingleAgent(
 			});
 
 			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(buffer);
+				stdoutLines.end();
 				resolve(code ?? 0);
 			});
 
