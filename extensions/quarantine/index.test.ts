@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { shouldRestoreEnabled, type LoadedState } from "./index.ts";
 
 const enabledState: LoadedState = {

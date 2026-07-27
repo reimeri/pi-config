@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 
 import {
 	buildGroupPlans,
@@ -255,6 +255,6 @@ describe("tool status and summaries", () => {
 		};
 		const customSummary = summarizeToolArgs(custom);
 		expect(customSummary.length).toBeLessThan(4_100);
-		expect(customSummary).toStartWith("payload=");
+		expect(customSummary.startsWith("payload=")).toBe(true);
 	});
 });

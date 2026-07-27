@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { LineStream } from "./line-stream.ts";
 
 function collect(chunks: Array<Buffer | string>): string[] {

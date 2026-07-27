@@ -1,17 +1,20 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-// Global extensions rely on Pi's loader aliases rather than a local node_modules.
-// Resolve the test's direct TUI import from the active Bun/Node installation.
+// Global extensions rely on Pi's loader aliases rather than a local node_modules, so the test's
+// direct TUI import is resolved against the active installation. Both layouts are checked at each
+// level: node keeps global packages under `lib/node_modules`, while a bun binary is itself installed
+// inside `node_modules` and so reaches it by walking up alone.
 function findGlobalModules(): string {
 	let current = dirname(process.execPath);
 	while (true) {
-		const candidate = join(current, "node_modules");
-		if (existsSync(join(candidate, "@earendil-works", "pi-coding-agent", "package.json"))) {
-			return candidate;
+		for (const candidate of [join(current, "node_modules"), join(current, "lib", "node_modules")]) {
+			if (existsSync(join(candidate, "@earendil-works", "pi-coding-agent", "package.json"))) {
+				return candidate;
+			}
 		}
 		const parent = dirname(current);
 		if (parent === current) throw new Error("Could not locate the active Pi installation");
@@ -109,8 +112,8 @@ describe("tool-groups extension", () => {
 			const start = extension?.handlers.get("session_start")?.[0];
 			const shutdown = extension?.handlers.get("session_shutdown")?.[0];
 			const command = extension?.commands.get("tool-groups");
-			expect(start).toBeFunction();
-			expect(shutdown).toBeFunction();
+			expect(typeof start).toBe("function");
+			expect(typeof shutdown).toBe("function");
 			expect(command).toBeDefined();
 			if (shutdown) shutdowns.push(shutdown);
 			return { start, shutdown, command };

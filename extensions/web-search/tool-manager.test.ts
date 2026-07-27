@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { createModelScopedToolManager } from "./tool-manager.ts";
 
 describe("model-scoped URL Context visibility", () => {

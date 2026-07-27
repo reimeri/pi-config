@@ -1,4 +1,4 @@
-import { mock } from "bun:test";
+import { vi } from "vitest";
 
 function truncation(text: string) {
 	const lines = text === "" ? 0 : text.split("\n").length;
@@ -13,7 +13,7 @@ function truncation(text: string) {
 	};
 }
 
-mock.module("@earendil-works/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", () => ({
 	DEFAULT_MAX_BYTES: 50 * 1024,
 	DEFAULT_MAX_LINES: 2_000,
 	formatSize: (bytes: number) => `${bytes}B`,
@@ -22,7 +22,7 @@ mock.module("@earendil-works/pi-coding-agent", () => ({
 	truncateTail: (text: string) => truncation(text),
 }));
 
-mock.module("@earendil-works/pi-ai", () => ({
+vi.mock("@earendil-works/pi-ai", () => ({
 	StringEnum: (values: readonly string[], options: Record<string, unknown> = {}) => ({
 		type: "string",
 		enum: [...values],
@@ -38,8 +38,8 @@ const Type = {
 	Optional: (schema: Record<string, unknown>) => ({ ...schema, optional: true }),
 };
 
-mock.module("typebox", () => ({ Type }));
-mock.module("@earendil-works/pi-tui", () => ({
+vi.mock("typebox", () => ({ Type }));
+vi.mock("@earendil-works/pi-tui", () => ({
 	Text: class Text {
 		constructor(public text: string) {}
 	},

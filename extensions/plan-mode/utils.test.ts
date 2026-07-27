@@ -1,7 +1,7 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test, vi } from "vitest";
 import { extractPlanSteps } from "./utils.ts";
 
-mock.module("@earendil-works/pi-tui", () => ({
+vi.mock("@earendil-works/pi-tui", () => ({
 	Key: { ctrlAlt: (key: string) => `ctrl+alt+${key}` },
 }));
 

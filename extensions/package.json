@@ -1,0 +1,13 @@
+{
+  "name": "pi-extensions-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Test harness for the extensions that ship as bare TypeScript. Carries no pi metadata, so it is not itself discovered as an extension package; base-lsp keeps its own package.json and runner.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "4.1.10"
+  }
+}

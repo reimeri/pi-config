@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { loadBackgroundTerminalConfig } from "./config.ts";
 
 const ENV_NAME = "PI_BACKGROUND_TERMINAL_READY_TIMEOUT_MS";

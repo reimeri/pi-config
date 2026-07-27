@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatToolModeStatus, ToolModeCoordinator } from "./coordinator.ts";
 import toolModeCoordinatorExtension from "./index.ts";

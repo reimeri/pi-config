@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import "./test-runtime.ts";
 import type {
 	BackgroundJobSnapshot,

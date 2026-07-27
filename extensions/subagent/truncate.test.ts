@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { truncateParallelOutput } from "./truncate.ts";
 
 const CAP = 50 * 1024;
@@ -69,9 +69,9 @@ describe("truncateParallelOutput", () => {
 	});
 
 	test("truncates multi-byte output in linear time", () => {
-		// Overshooting the byte budget and then re-measuring per removed character cost ~52ms for
-		// this input under bun (~800ms under node, whose Buffer.byteLength is far slower), against
-		// ~0.14ms here. The work no longer scales with how much gets discarded.
+		// Overshooting the byte budget and then re-measuring per removed character cost ~800ms for
+		// this input on the runtime Pi actually uses, against ~0.2ms here. The work no longer scales
+		// with how much gets discarded.
 		const text = "这是一个测试用的字符串。".repeat(20_000);
 		const started = performance.now();
 		const result = truncateParallelOutput(text);

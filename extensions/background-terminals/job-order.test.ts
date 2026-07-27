@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { prioritizeActiveJobs } from "./job-order.ts";
 
 describe("prioritizeActiveJobs", () => {

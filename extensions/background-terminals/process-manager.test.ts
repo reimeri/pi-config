@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
+import { setTimeout as sleep } from "node:timers/promises";
 import "./test-runtime.ts";
 import type { BackgroundTerminalConfig, ReadinessStatus } from "./types.ts";
 
@@ -27,7 +28,7 @@ async function waitForReadiness(
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if (manager.get(id)?.readiness.status === status) return;
-		await Bun.sleep(10);
+		await sleep(10);
 	}
 	throw new Error(`Timed out waiting for ${id} readiness=${status}`);
 }
@@ -65,7 +66,7 @@ test("returns waiting after the foreground limit and keeps monitoring asynchrono
 		expect(progress.some((text) => text.includes("booting asynchronously"))).toBe(true);
 
 		await waitForReadiness(manager, result.job.id, "ready");
-		expect(manager.get(result.job.id)?.readiness.matchedAt).toBeNumber();
+		expect(typeof manager.get(result.job.id)?.readiness.matchedAt).toBe("number");
 	} finally {
 		await manager.shutdown();
 	}
@@ -168,7 +169,7 @@ test("aborting after the foreground return does not terminate asynchronous monit
 		expect(result.job.readiness.status).toBe("waiting");
 
 		controller.abort();
-		await Bun.sleep(20);
+		await sleep(20);
 		expect(manager.get(result.job.id)?.status).toBe("running");
 		await waitForReadiness(manager, result.job.id, "timed_out");
 	} finally {
@@ -186,7 +187,7 @@ test("process exit settles asynchronous readiness without a later timeout overwr
 		});
 		expect(result.job.readiness.status).toBe("waiting");
 		await waitForReadiness(manager, result.job.id, "exited");
-		await Bun.sleep(300);
+		await sleep(300);
 		expect(manager.get(result.job.id)?.readiness.status).toBe("exited");
 	} finally {
 		await manager.shutdown();

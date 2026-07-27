@@ -1,7 +1,7 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test, vi } from "vitest";
 import type { ProviderResult } from "./types.ts";
 
-mock.module("@earendil-works/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", () => ({
 	DEFAULT_MAX_BYTES: 50 * 1024,
 	DEFAULT_MAX_LINES: 2_000,
 	truncateHead(text: string, options: { maxLines: number; maxBytes: number }) {
@@ -50,7 +50,7 @@ describe("web search temporal context", () => {
 		const { formatProviderResult } = await import("./format.ts");
 		const formatted = formatProviderResult(providerResult, "gpt-test", SEARCHED_AT);
 		expect(prompt).toContain(`Current date and time: ${SEARCHED_AT} (UTC)`);
-		expect(formatted.text).toStartWith(`## Web Search Context\nSearch performed at ${SEARCHED_AT}.`);
+		expect(formatted.text.startsWith(`## Web Search Context\nSearch performed at ${SEARCHED_AT}.`)).toBe(true);
 		expect(formatted.text).toContain("[Answer truncated;");
 		expect(formatted.details.searchedAt).toBe(SEARCHED_AT);
 	});
