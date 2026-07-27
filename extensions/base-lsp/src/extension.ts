@@ -39,7 +39,8 @@ export default function registerBaseLsp(pi: ExtensionAPI): void {
       const lines = await Promise.all(definitions.map(async (definition) => {
         const client = active.find((item) => item.server === definition.id);
         const available = await resolveExecutable(definition.command[0]!);
-        return `${definition.id}: ${client?.state ?? (available ? "available (idle)" : "missing")} command=${definition.command.join(" ")}${client ? ` root=${client.root}` : ""}${!available && definition.installationHint ? `; ${definition.installationHint}` : ""}`;
+        const line = `${definition.id}: ${client?.state ?? (available ? "available (idle)" : "missing")} command=${definition.command.join(" ")}${client ? ` root=${client.root}` : ""}${!available && definition.installationHint ? `; ${definition.installationHint}` : ""}`;
+        return ctx.mode === "tui" ? ctx.ui.theme.fg(available ? "text" : "dim", line) : line;
       }));
       notify(ctx, lines.join("\n"), "info");
     },
