@@ -8,5 +8,6 @@
   "compaction": {
     "enabled": false
   },
-  "hideThinkingBlock": false
+  "hideThinkingBlock": false,
+  "showCacheMissNotices": true
 }

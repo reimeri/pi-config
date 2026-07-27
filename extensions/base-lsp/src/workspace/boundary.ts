@@ -25,13 +25,20 @@ export function isContained(boundary: string, candidate: string): boolean {
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
-export async function resolveInputPath(input: string, cwd: string, boundary: string, requireFile = true): Promise<string> {
+export interface ResolvedInputPath { canonical: string; lexical: string; lexicalDirectory?: string }
+
+export async function resolveInputPathDetails(input: string, cwd: string, boundary: string, requireFile = true): Promise<ResolvedInputPath> {
   const lexical = resolve(cwd, stripLeadingAt(input));
   if (!isContained(boundary, lexical)) throw new Error(`Path is outside the session boundary: ${input}`);
   const canonical = await realpath(lexical);
   if (!isContained(boundary, canonical)) throw new Error(`Path resolves outside the session boundary: ${input}`);
   if (requireFile && !(await stat(canonical)).isFile()) throw new Error(`Path is not a regular file: ${input}`);
-  return canonical;
+  const directory = await realpath(dirname(lexical));
+  return { canonical, lexical, ...(isContained(boundary, directory) ? { lexicalDirectory: directory } : {}) };
+}
+
+export async function resolveInputPath(input: string, cwd: string, boundary: string, requireFile = true): Promise<string> {
+  return (await resolveInputPathDetails(input, cwd, boundary, requireFile)).canonical;
 }
 
 export async function resolveExplicitRoot(input: string, cwd: string, boundary: string): Promise<string> {

@@ -1,9 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isEditToolResult, isWriteToolResult } from "@earendil-works/pi-coding-agent";
-import { deriveBoundary, resolveInputPath } from "./workspace/boundary.js";
+import { deriveBoundary, resolveInputPathDetails } from "./workspace/boundary.js";
 import { loadConfig, redactConfig } from "./config/loader.js";
 import { ServerRegistry } from "./servers/registry.js";
-import { RootDetector } from "./servers/roots.js";
+import { RootDetector, isRootMarkerName } from "./servers/roots.js";
+import { fileNameOf } from "./workspace/files.js";
 import { ClientManager } from "./runtime/client-manager.js";
 import { DiagnosticService } from "./protocol/diagnostics.js";
 import type { SessionRuntime } from "./tools/context.js";
@@ -56,9 +57,18 @@ export default function registerBaseLsp(pi: ExtensionAPI): void {
     if (ctx.hasUI) { ctx.ui.setStatus("base-lsp", undefined); for (const warning of loaded.warnings.slice(0, 3)) ctx.ui.notify(`base-lsp: ${sanitizeText(warning, 500)}`, "warning"); }
   });
   pi.on("tool_result", async (event, ctx) => {
-    if (!runtime || event.isError !== false || (!isWriteToolResult(event) && !isEditToolResult(event))) return;
+    const current = runtime;
+    if (!current || event.isError !== false || (!isWriteToolResult(event) && !isEditToolResult(event))) return;
     const input = event.input as { path?: unknown }; if (typeof input.path !== "string") return;
-    try { const path = await resolveInputPath(stripLeadingAt(input.path), ctx.cwd, runtime.boundary); runtime.changed.add(path); await runtime.manager.syncActiveFile(path, ctx.signal, true); } catch { /* mutation outside the active boundary or removed file */ }
+    try {
+      const path = await resolveInputPathDetails(stripLeadingAt(input.path), ctx.cwd, current.boundary);
+      if (runtime !== current) return;
+      current.changed.add(path.canonical);
+      // Match the name and parent through which the tool wrote. The canonical file may be the
+      // target of a marker-named symlink and therefore have a completely different name and parent.
+      if (path.lexicalDirectory && isRootMarkerName(current.registry.enabled(), fileNameOf(path.lexical))) current.roots.invalidateUnder(path.lexicalDirectory);
+      await current.manager.syncActiveFile(path.canonical, ctx.signal, true);
+    } catch { /* mutation outside the active boundary or removed file */ }
   });
   pi.on("session_shutdown", async (_event, ctx) => {
     if (ctx.hasUI) ctx.ui.setStatus("base-lsp", undefined);

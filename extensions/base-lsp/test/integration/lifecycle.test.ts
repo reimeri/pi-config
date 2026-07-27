@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import register from "../../src/extension.js";
+import { RootDetector } from "../../src/servers/roots.js";
 
 function harness() {
   const tools = new Map<string, any>(); const commands = new Map<string, any>(); const handlers = new Map<string, any[]>();
@@ -60,6 +61,25 @@ describe("Pi lifecycle integration", () => {
       expect(rpcCtx.notifications[0]).toMatch(/^typescript: available \(idle\)/);
       expect(rpcCtx.notifications[0]).not.toContain("<text>");
     } finally { await handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx); }
+  });
+
+  it("invalidates the lexical parent when a marker-named symlink is written", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-symlink-marker-"));
+    const project = join(root, "project"); const targets = join(root, "targets");
+    await mkdir(project); await mkdir(targets); await mkdir(join(root, ".git"));
+    const marker = join(project, "deno.json");
+    await symlink(join(targets, "configuration"), marker);
+    const { handlers } = harness(); const ctx = context(root, true);
+    await handlers.get("session_start")![0]({ reason: "startup" }, ctx);
+    const invalidation = vi.spyOn(RootDetector.prototype, "invalidateUnder");
+    try {
+      await writeFile(marker, "{}\n");
+      await handlers.get("tool_result")![0]({ toolName: "write", toolCallId: "write-marker", input: { path: marker }, content: [], details: undefined, isError: false }, ctx);
+      expect(invalidation).toHaveBeenCalledWith(project);
+    } finally {
+      invalidation.mockRestore();
+      await handlers.get("session_shutdown")![0]({ reason: "quit" }, ctx);
+    }
   });
 
   it("does not write command output directly into print/JSON streams", async () => {
