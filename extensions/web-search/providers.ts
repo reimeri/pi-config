@@ -121,7 +121,7 @@ interface TextAccumulator {
 
 function appendText(accumulator: TextAccumulator, value: unknown): void {
 	if (typeof value !== "string" || !value) return;
-	accumulator.bytes += new TextEncoder().encode(value).byteLength;
+	accumulator.bytes += Buffer.byteLength(value, "utf8");
 	if (accumulator.bytes > MAX_ANSWER_BYTES) throw new Error("Provider answer exceeded the size limit");
 	accumulator.value += value;
 }

@@ -13,7 +13,7 @@ const DEFAULT_MAX_EVENT_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_STREAM_BYTES = 20 * 1024 * 1024;
 
 function byteLength(value: string): number {
-	return new TextEncoder().encode(value).byteLength;
+	return Buffer.byteLength(value, "utf8");
 }
 
 export async function readJsonSse(
@@ -26,7 +26,16 @@ export async function readJsonSse(
 	const decoder = new TextDecoder();
 	const maxEventBytes = options.maxEventBytes ?? DEFAULT_MAX_EVENT_BYTES;
 	const maxStreamBytes = options.maxStreamBytes ?? DEFAULT_MAX_STREAM_BYTES;
-	let buffer = "";
+	/**
+	 * Fragments of the line currently being received, kept unjoined. A provider can deliver one
+	 * `data:` line of several MB across hundreds of reads; accumulating that into a single string
+	 * and re-splitting it per read cost O(line) each time, making a large event quadratic to
+	 * receive. Newlines are searched for within each arriving chunk instead, so the retained
+	 * fragments are only joined once, when their line completes.
+	 */
+	let pending: string[] = [];
+	/** Combined byte length of `pending`, maintained incrementally for the same reason. */
+	let pendingBytes = 0;
 	let eventName = "";
 	let dataLines: string[] = [];
 	let eventBytes = 0;
@@ -54,44 +63,68 @@ export async function readJsonSse(
 		return (await onEvent({ event: currentName, data })) === true;
 	};
 
+	/** Complete the pending line with `tail`, consuming the fragments. Mirrors a `/\r?\n/` split: a
+	 * lone carriage return is not a separator, but one directly before the newline is dropped. */
+	const takeLine = (tail: string): string => {
+		const line = pending.length === 0 ? tail : pending.join("") + tail;
+		pending = [];
+		pendingBytes = 0;
+		return line.endsWith("\r") ? line.slice(0, -1) : line;
+	};
+
+	/** Returns true when the consumer asked to stop. */
+	const handleLine = async (line: string): Promise<boolean> => {
+		if (line === "") return await dispatch();
+		if (line.startsWith("data:")) {
+			const data = line.slice(5).trimStart();
+			eventBytes += byteLength(data) + (dataLines.length > 0 ? 1 : 0);
+			if (eventBytes > maxEventBytes) throw new Error("Provider SSE event exceeded the size limit");
+			dataLines.push(data);
+		} else if (line.startsWith("event:")) {
+			eventName = line.slice(6).trim();
+		}
+		return false;
+	};
+
 	try {
 		while (true) {
 			if (options.signal?.aborted) throw options.signal.reason ?? new Error("Request was aborted");
 			const { done, value } = await reader.read();
 			if (done) {
 				reachedEof = true;
-				buffer += decoder.decode();
+				const flushed = decoder.decode();
+				if (flushed) {
+					pending.push(flushed);
+					pendingBytes += byteLength(flushed);
+				}
 				break;
 			}
 			totalBytes += value.byteLength;
 			if (totalBytes > maxStreamBytes) throw new Error("Provider SSE stream exceeded the size limit");
-			buffer += decoder.decode(value, { stream: true });
-			if (byteLength(buffer) + eventBytes > maxEventBytes) {
+			const decoded = decoder.decode(value, { stream: true });
+			pendingBytes += byteLength(decoded);
+			if (pendingBytes + eventBytes > maxEventBytes) {
 				throw new Error("Provider SSE event exceeded the size limit");
 			}
-			const lines = buffer.split(/\r?\n/u);
-			buffer = lines.pop() ?? "";
-			for (const line of lines) {
-				if (line === "") {
-					if (await dispatch()) return;
-				} else if (line.startsWith("data:")) {
-					const data = line.slice(5).trimStart();
-					eventBytes += byteLength(data) + (dataLines.length > 0 ? 1 : 0);
-					if (eventBytes > maxEventBytes) throw new Error("Provider SSE event exceeded the size limit");
-					dataLines.push(data);
-				} else if (line.startsWith("event:")) {
-					eventName = line.slice(6).trim();
-				}
+			let lineStart = 0;
+			let newline = decoded.indexOf("\n");
+			while (newline !== -1) {
+				if (await handleLine(takeLine(decoded.slice(lineStart, newline)))) return;
+				lineStart = newline + 1;
+				newline = decoded.indexOf("\n", lineStart);
+			}
+			// `takeLine` cleared the counter for each completed line; whatever follows the last
+			// newline is the new pending line and is the only part still awaiting one.
+			if (lineStart > 0) {
+				const tail = decoded.slice(lineStart);
+				pending = tail ? [tail] : [];
+				pendingBytes = byteLength(tail);
+			} else {
+				pending.push(decoded);
 			}
 		}
-		if (buffer) {
-			if (buffer.startsWith("data:")) {
-				const data = buffer.slice(5).trimStart();
-				eventBytes += byteLength(data) + (dataLines.length > 0 ? 1 : 0);
-				if (eventBytes > maxEventBytes) throw new Error("Provider SSE event exceeded the size limit");
-				dataLines.push(data);
-			} else if (buffer.startsWith("event:")) eventName = buffer.slice(6).trim();
-		}
+		const trailing = takeLine("");
+		if (trailing) await handleLine(trailing);
 		await dispatch();
 	} finally {
 		if (!reachedEof) {
