@@ -9,7 +9,7 @@ import type { NormalizedCapabilities } from "../../src/protocol/types.js";
 const capabilities: NormalizedCapabilities = {
   positionEncoding: "utf-16", syncKind: 2, openClose: true, save: { includeText: true }, diagnostics: { pull: false, workspace: false },
   declaration: false, definition: false, typeDefinition: false, implementation: false, references: false, hover: false, documentSymbols: false,
-  workspaceSymbols: false, workspaceSymbolResolve: false, callHierarchy: false, codeActions: false, codeActionResolve: false, rename: false, prepareRename: false,
+  workspaceSymbols: false, workspaceSymbolResolve: false, callHierarchy: false, codeActions: false, codeActionResolve: false, rename: false, prepareRename: false, executeCommands: [],
 };
 
 describe("document synchronization ordering", () => {

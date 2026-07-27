@@ -68,10 +68,11 @@ async function resultFor(method, params) {
       return { capabilities: {
         positionEncoding: process.env.FAKE_LSP_ENCODING ?? "utf-16",
         textDocumentSync: { openClose: true, change: 2, save: { includeText: true } },
-        diagnosticProvider: { identifier: "fake", interFileDependencies: true, workspaceDiagnostics: true },
+        ...(process.env.FAKE_LSP_NO_PULL === "1" ? {} : { diagnosticProvider: { identifier: "fake", interFileDependencies: true, workspaceDiagnostics: true } }),
         ...(process.env.FAKE_LSP_NO_DECLARATION === "1" ? {} : { declarationProvider: true }), definitionProvider: true, typeDefinitionProvider: true, implementationProvider: true, referencesProvider: true, hoverProvider: true,
         documentSymbolProvider: true, workspaceSymbolProvider: { resolveProvider: true }, callHierarchyProvider: true,
         codeActionProvider: { resolveProvider: true }, renameProvider: { prepareProvider: true },
+        ...(process.env.FAKE_LSP_TS_REQUEST === "1" ? { executeCommandProvider: { commands: ["typescript.tsserverRequest"] } } : {}),
       }, serverInfo: { name: process.env.FAKE_LSP_SERVER_NAME ?? "base-lsp-fake", version: "1" } };
     case "shutdown": if (process.env.FAKE_LSP_HANG_SHUTDOWN === "1") return new Promise(() => {}); return null;
     case "textDocument/diagnostic": return documentDiagnostic(params.textDocument.uri, params.previousResultId);
@@ -91,6 +92,20 @@ async function resultFor(method, params) {
     case "textDocument/prepareCallHierarchy": return [callItem(params.textDocument.uri)];
     case "callHierarchy/incomingCalls": return [{ from: callItem(params.item.uri), fromRanges: [range(0, 0, 0, 1)] }];
     case "callHierarchy/outgoingCalls": return [{ to: callItem(params.item.uri), fromRanges: [range(0, 0, 0, 1)] }];
+    case "workspace/executeCommand": {
+      if (params.command !== "typescript.tsserverRequest" || process.env.FAKE_LSP_TS_REQUEST !== "1") throw new Error(`Unsupported command ${params.command}`);
+      if (process.env.FAKE_LSP_EXECUTE_LOG) appendFileSync(process.env.FAKE_LSP_EXECUTE_LOG, `${params.arguments?.[0] ?? "unknown"}\n`);
+      const [command, args] = params.arguments ?? [];
+      if (process.env.FAKE_LSP_TS_REQUEST_REJECT === "1") throw new Error("fake tsserver request rejected");
+      if (process.env.FAKE_LSP_TS_REQUEST_HANG_URI_SUFFIX && args?.file?.endsWith(process.env.FAKE_LSP_TS_REQUEST_HANG_URI_SUFFIX)) return new Promise(() => {});
+      if (process.env.FAKE_LSP_TS_REQUEST_MALFORMED === "1") return { success: true, body: [{ bad: true }] };
+      const document = documents.get(args?.file) ?? { text: "", version: 0 };
+      const offset = document.text.indexOf("ERROR");
+      const body = command === "semanticDiagnosticsSync" && offset >= 0
+        ? [{ start: oneBasedLocation(document.text, offset), end: oneBasedLocation(document.text, offset + 5), text: "fake tsserver semantic error", category: "error", code: 9001 }]
+        : [];
+      return { seq: 0, type: "response", command, request_seq: 1, success: true, body };
+    }
     case "textDocument/codeAction": {
       const mode = process.env.FAKE_LSP_ACTION_MODE;
       if (mode === "command") return [{ title: "Run unsafe command", command: "fake.command", arguments: [] }];
@@ -147,6 +162,7 @@ function documentDiagnostic(uri, previousResultId) {
   return { kind: "full", resultId, items };
 }
 async function publish(uri) {
+  if (process.env.FAKE_LSP_SILENT_URI_SUFFIX && uri.endsWith(process.env.FAKE_LSP_SILENT_URI_SUFFIX)) return;
   const barrierCount = Number(process.env.FAKE_LSP_DID_OPEN_BARRIER_COUNT ?? 0);
   if (barrierCount > 0 && process.env.FAKE_LSP_DID_OPEN_LOG && !await waitForOpenBarrier(process.env.FAKE_LSP_DID_OPEN_LOG, barrierCount)) return;
   const document = documents.get(uri);
@@ -194,6 +210,7 @@ function wordAt(uri, position) {
 }
 function occurrences(text, needle) { const result = []; if (!needle) return result; for (let at = 0; (at = text.indexOf(needle, at)) >= 0; at += needle.length) result.push(at); return result; }
 function offsetRange(text, offset, length) { const before = text.slice(0, offset).split(/\r?\n/); const line = before.length - 1; const character = before.at(-1).length; return range(line, character, line, character + length); }
+function oneBasedLocation(text, offset) { const before = text.slice(0, offset).split(/\r?\n/); return { line: before.length, offset: before.at(-1).length + 1 }; }
 function range(startLine, startCharacter, endLine, endCharacter) { return { start: { line: startLine, character: startCharacter }, end: { line: endLine, character: endCharacter } }; }
 function callItem(uri) { return { name: "fakeCall", kind: 12, uri, range: range(0, 0, 0, 5), selectionRange: range(0, 0, 0, 5), data: { fake: true } }; }
 function hash(text) { return createHash("sha1").update(text).digest("hex").slice(0, 8); }

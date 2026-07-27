@@ -46,6 +46,7 @@ export interface ServerCapabilities {
   callHierarchyProvider?: unknown;
   codeActionProvider?: boolean | { codeActionKinds?: string[]; resolveProvider?: boolean };
   renameProvider?: boolean | { prepareProvider?: boolean };
+  executeCommandProvider?: { commands?: string[] };
   workspace?: { workspaceFolders?: { supported?: boolean; changeNotifications?: boolean | string } };
   [key: string]: unknown;
 }
@@ -72,6 +73,7 @@ export interface NormalizedCapabilities {
   codeActionResolve: boolean;
   rename: boolean;
   prepareRename: boolean;
+  executeCommands: string[];
 }
 
 export function normalizeCapabilities(capabilities: ServerCapabilities): NormalizedCapabilities {
@@ -82,6 +84,7 @@ export function normalizeCapabilities(capabilities: ServerCapabilities): Normali
   const codeAction = capabilities.codeActionProvider;
   const workspaceSymbol = capabilities.workspaceSymbolProvider;
   const rename = capabilities.renameProvider;
+  const executeCommands = capabilities.executeCommandProvider?.commands;
   return {
     positionEncoding: capabilities.positionEncoding ?? "utf-16",
     syncKind,
@@ -102,5 +105,6 @@ export function normalizeCapabilities(capabilities: ServerCapabilities): Normali
     codeActionResolve: typeof codeAction === "object" && codeAction.resolveProvider === true,
     rename: Boolean(rename),
     prepareRename: typeof rename === "object" && rename.prepareProvider === true,
+    executeCommands: Array.isArray(executeCommands) ? executeCommands.filter((command): command is string => typeof command === "string") : [],
   };
 }

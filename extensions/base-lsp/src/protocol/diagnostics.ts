@@ -6,7 +6,7 @@ import { sanitizeText } from "../util/text.js";
 import { isTypeScriptLanguageServer } from "../servers/implementation.js";
 
 export type DiagnosticEvidenceState = "diagnostics" | "clean" | "unconfirmed" | "timed_out" | "unavailable" | "cancelled" | "error";
-export interface DiagnosticEvidence { state: DiagnosticEvidenceState; diagnostics: Diagnostic[]; omittedDiagnostics?: number; version?: number; possiblyStale?: boolean; resultId?: string; message?: string; confirmation?: "versioned" | "post_open_server_policy" }
+export interface DiagnosticEvidence { state: DiagnosticEvidenceState; diagnostics: Diagnostic[]; omittedDiagnostics?: number; version?: number; possiblyStale?: boolean; resultId?: string; message?: string; confirmation?: "versioned" | "post_open_server_policy" | "typescript_tsserver_request" }
 export interface WorkspaceDiagnosticEvidence { evidence: Map<string, DiagnosticEvidence>; omittedReports: number }
 export type PushCheckpoint = number;
 
@@ -19,6 +19,9 @@ interface ClientDiagnosticState {
   sequence: number;
   dispose: () => void;
 }
+
+const TS_SERVER_REQUEST_COMMAND = "typescript.tsserverRequest";
+const TS_DIAGNOSTIC_COMMANDS = ["syntacticDiagnosticsSync", "semanticDiagnosticsSync", "suggestionDiagnosticsSync"] as const;
 
 export class DiagnosticService {
   constructor(private readonly maxDiagnostics = 1_000, private readonly maxCachedUris = 500) {}
@@ -62,10 +65,92 @@ export class DiagnosticService {
       if ((evidence.state === "clean" || evidence.state === "diagnostics") && !evidence.possiblyStale) this.cacheConfirmed(state, snapshot, evidence);
       return evidence;
     } catch (error) {
-      if (error instanceof TimeoutError) return { state: "timed_out", diagnostics: [], message: error.message };
+      const timeoutReason = signal?.reason;
+      if (error instanceof TimeoutError || timeoutReason instanceof TimeoutError) return { state: "timed_out", diagnostics: [], message: error instanceof TimeoutError ? error.message : timeoutReason!.message };
       if (error instanceof CancelledError || (error instanceof Error && error.name === "AbortError")) return { state: "cancelled", diagnostics: [], message: "Cancelled" };
       return { state: "error", diagnostics: [], message: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /**
+   * Check a push-only group concurrently under one absolute deadline. The server may publish while
+   * the documents are being synchronized, so callers take the checkpoint before opening the batch;
+   * `check()` still inspects retained publications before registering its waiter. Per-file waits
+   * therefore overlap instead of multiplying the policy grace or silence timeout by file count.
+   */
+  async checkPushBatch(client: LspClient, snapshots: DocumentSnapshot[], deadlineAt: number, refresh: boolean, signal?: AbortSignal, checkpoint?: PushCheckpoint): Promise<Map<string, DiagnosticEvidence>> {
+    throwIfAborted(signal);
+    const direct = await this.checkTypeScriptBatch(client, snapshots, deadlineAt, refresh, signal);
+    const entries = await Promise.all(snapshots.map(async (snapshot) => {
+      const affirmative = direct?.get(snapshot.uri);
+      if (affirmative) return [snapshot.uri, affirmative] as const;
+      if (signal?.aborted) return [snapshot.uri, evidenceFromBatchError(signal.reason, signal)] as const;
+      const remaining = deadlineAt - Date.now();
+      if (remaining <= 0) return [snapshot.uri, { state: "timed_out", diagnostics: [], message: "Shared diagnostic deadline elapsed" } satisfies DiagnosticEvidence] as const;
+      try {
+        const result = await this.check(client, snapshot, remaining, refresh, signal, checkpoint);
+        return [snapshot.uri, result] as const;
+      } catch (error) {
+        return [snapshot.uri, evidenceFromBatchError(error, signal)] as const;
+      }
+    }));
+    return new Map(entries);
+  }
+
+  /**
+   * typescript-language-server exposes a narrow read-only bridge to tsserver's synchronous
+   * syntactic, semantic, and suggestion diagnostic requests. Unlike its unversioned push stream,
+   * completion of all three requests is affirmative for the synchronized document and needs no
+   * temporal clean heuristic. Any unsupported or malformed response falls back to normal push
+   * evidence instead of being mistaken for clean.
+   */
+  private async checkTypeScriptBatch(client: LspClient, snapshots: DocumentSnapshot[], deadlineAt: number, refresh: boolean, signal?: AbortSignal): Promise<Map<string, DiagnosticEvidence | undefined> | undefined> {
+    if (!isTypeScriptLanguageServer(client.server, client.serverInfo) || !client.capabilities?.executeCommands.includes(TS_SERVER_REQUEST_COMMAND)) return undefined;
+    const state = this.ensure(client);
+    const results = new Map<string, DiagnosticEvidence | undefined>();
+    const pending: DocumentSnapshot[] = [];
+    for (const snapshot of snapshots) {
+      const cacheKey = `${snapshot.uri}\0${snapshot.contentHash}`;
+      if (!refresh) {
+        const cached = state.confirmed.get(cacheKey);
+        if (cached) { results.set(snapshot.uri, structuredClone(cached)); continue; }
+      } else {
+        state.reports.delete(snapshot.uri);
+        for (const key of [...state.confirmed.keys()]) if (key.startsWith(`${snapshot.uri}\0`)) state.confirmed.delete(key);
+      }
+      pending.push(snapshot);
+    }
+    await mapConcurrent(pending, Math.min(4, pending.length), async (snapshot) => {
+      try {
+        const reports = await Promise.all(TS_DIAGNOSTIC_COMMANDS.map(async (command) => {
+          const remaining = deadlineAt - Date.now();
+          if (remaining <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed during TypeScript diagnostics");
+          return client.request<unknown>("workspace/executeCommand", {
+            command: TS_SERVER_REQUEST_COMMAND,
+            arguments: [command, { file: snapshot.uri }, { expectsResult: true, isAsync: false, lowPriority: false }],
+          }, signal, remaining);
+        }));
+        const merged: Diagnostic[] = [];
+        for (const report of reports) {
+          const diagnostics = diagnosticsFromTsServerResponse(report);
+          if (!diagnostics) throw new Error("Malformed typescript.tsserverRequest diagnostic response");
+          merged.push(...diagnostics);
+        }
+        const diagnostics = dedupeDiagnostics(merged);
+        const bounded = diagnostics.slice(0, this.maxDiagnostics);
+        const evidence: DiagnosticEvidence = {
+          state: diagnostics.length ? "diagnostics" : "clean",
+          diagnostics: bounded,
+          confirmation: "typescript_tsserver_request",
+          ...(diagnostics.length > bounded.length ? { omittedDiagnostics: diagnostics.length - bounded.length } : {}),
+        };
+        this.cacheConfirmed(state, snapshot, evidence);
+        results.set(snapshot.uri, evidence);
+      } catch {
+        results.set(snapshot.uri, undefined);
+      }
+    });
+    return results;
   }
 
   async checkWorkspace(client: LspClient, snapshots: DocumentSnapshot[], waitMs: number, refresh: boolean, signal?: AbortSignal): Promise<WorkspaceDiagnosticEvidence> {
@@ -121,8 +206,8 @@ export class DiagnosticService {
       }
       return { evidence, omittedReports };
     } catch (error) {
-      const stateName: DiagnosticEvidenceState = error instanceof TimeoutError ? "timed_out" : error instanceof CancelledError || (error instanceof Error && error.name === "AbortError") ? "cancelled" : "error";
-      const message = error instanceof Error ? error.message : String(error);
+      const stateName: DiagnosticEvidenceState = error instanceof TimeoutError || signal?.reason instanceof TimeoutError ? "timed_out" : error instanceof CancelledError || (error instanceof Error && error.name === "AbortError") ? "cancelled" : "error";
+      const message = signal?.reason instanceof TimeoutError ? signal.reason.message : error instanceof Error ? error.message : String(error);
       return { evidence: new Map(snapshots.map((snapshot) => [snapshot.uri, { state: stateName, diagnostics: [], message }])), omittedReports: 0 };
     }
   }
@@ -283,3 +368,64 @@ function boundDiagnostic(diagnostic: Diagnostic): Diagnostic {
     ...(diagnostic.relatedInformation ? { relatedInformation: diagnostic.relatedInformation.slice(0, 10).map((item) => ({ location: item.location, message: sanitizeText(item.message, 2_000) })) } : {}),
   };
 }
+
+function evidenceFromBatchError(error: unknown, signal?: AbortSignal): DiagnosticEvidence {
+  const cause = signal?.aborted ? signal.reason : error;
+  if (cause instanceof TimeoutError || error instanceof TimeoutError) return { state: "timed_out", diagnostics: [], message: cause instanceof Error ? cause.message : "Shared diagnostic deadline elapsed" };
+  if (cause instanceof CancelledError || (cause instanceof Error && cause.name === "AbortError") || error instanceof CancelledError) return { state: "cancelled", diagnostics: [], message: "Cancelled" };
+  return { state: "error", diagnostics: [], message: cause instanceof Error ? cause.message : String(cause) };
+}
+
+function diagnosticsFromTsServerResponse(value: unknown): Diagnostic[] | undefined {
+  if (!isRecord(value) || value.success !== true || !Array.isArray(value.body)) return undefined;
+  const diagnostics: Diagnostic[] = [];
+  for (const item of value.body) {
+    if (!isRecord(item)) return undefined;
+    const start = tsServerLocation(item.start) ?? tsServerLocation(item.startLocation);
+    const end = tsServerLocation(item.end) ?? tsServerLocation(item.endLocation);
+    const message = typeof item.text === "string" ? item.text : typeof item.message === "string" ? item.message : undefined;
+    if (!start || !end || !message) return undefined;
+    const category = typeof item.category === "string" ? item.category.toLowerCase() : "error";
+    const severity = category === "warning" ? 2 : category === "suggestion" ? 4 : category === "message" ? 3 : 1;
+    const tags = [item.reportsUnnecessary ? 1 : undefined, item.reportsDeprecated ? 2 : undefined].filter((tag): tag is number => tag !== undefined);
+    diagnostics.push({
+      range: { start, end },
+      message: sanitizeText(message, 4_000),
+      severity,
+      ...(typeof item.code === "number" || typeof item.code === "string" ? { code: item.code } : {}),
+      source: typeof item.source === "string" ? sanitizeText(item.source, 500) : "tsserver",
+      ...(tags.length ? { tags } : {}),
+    });
+  }
+  return diagnostics;
+}
+
+function tsServerLocation(value: unknown): { line: number; character: number } | undefined {
+  if (!isRecord(value) || !Number.isSafeInteger(value.line) || !Number.isSafeInteger(value.offset)) return undefined;
+  const line = Number(value.line); const offset = Number(value.offset);
+  return line > 0 && offset > 0 ? { line: line - 1, character: offset - 1 } : undefined;
+}
+
+function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
+  const seen = new Set<string>();
+  return diagnostics.filter((diagnostic) => {
+    const key = `${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.range.end.line}:${diagnostic.range.end.character}:${String(diagnostic.code ?? "")}:${diagnostic.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+}
+
+async function mapConcurrent<T>(items: T[], concurrency: number, fn: (item: T) => Promise<void>): Promise<void> {
+  if (!items.length) return;
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = next; next += 1;
+      if (index >= items.length) return;
+      await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, () => worker()));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }

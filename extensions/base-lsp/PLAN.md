@@ -214,7 +214,7 @@ Schema:
   mode?: "changed" | "paths" | "workspace"; // default paths if paths given, otherwise workspace
   maxFiles?: number;                   // clamped to configured hard limit
   maxDiagnostics?: number;             // clamped to configured hard limit
-  waitMs?: number;                     // clamped to request timeout ceiling
+  waitMs?: number;                     // shared whole-call collection deadline, clamped to request timeout ceiling
   refresh?: boolean;                   // bypass confirmed in-memory result cache
 }
 ```
@@ -223,7 +223,7 @@ Behavior:
 
 - `changed` checks files synchronized or observed as changed during the session.
 - `paths` checks explicit files/directories.
-- `workspace` uses `workspace/diagnostic` if advertised and reliable for a selected server/root; otherwise performs a bounded, server-affine file sweep.
+- `workspace` uses `workspace/diagnostic` if advertised and reliable for a selected server/root; otherwise performs a bounded, server-affine file sweep. Push-only files are synchronized/opened in bounded batches and observed concurrently; pull-only fallbacks consume the same remaining deadline.
 - Candidate discovery and server selection are deterministic:
   1. For `changed`, inventory the bounded changed-file set. For `paths`, inventory only explicit files/directories. For default/workspace mode, perform one deterministic sorted walk of the session boundary, honoring ignores, file-size limits, a separate hard `maxDiscoveryEntries`, and `maxFiles`; report `partial` if discovery is capped.
   2. If `server` is explicit, retain only files matching those server definitions and resolve roots from them.
@@ -856,7 +856,7 @@ Support both push and pull diagnostics.
 
 - Track `publishDiagnostics` by URI and document version when supplied.
 - Clear or mark prior diagnostics stale when sending a new document version.
-- Wait for the first relevant publication, then use a configurable quiet/settle period.
+- Wait for the first relevant publication, then use a configurable quiet/settle period shared by the whole synchronized batch rather than restarted for each file.
 - If no publication arrives before a configured grace/timeout, return `unconfirmed`, not `clean`.
 - Ignore publications older than the current document version when the server supplies versions.
 - For unversioned publications, non-empty findings may be returned as `diagnostics` with `possiblyStale: true`. An empty unversioned publication after a change is provisional and remains `unconfirmed` unless a documented per-server policy and real-server test establish a causal post-change barrier.
@@ -872,7 +872,8 @@ Support both push and pull diagnostics.
 - When `workspace/diagnostic` is advertised, send bounded `previousResultIds`, consume full and unchanged document reports plus related-document and partial-result data, and preserve a complete cached full report for every reused result id.
 - Handle `workspace/diagnostic/refresh` by invalidating affected confirmed caches and result ids; do not launch an automatic sweep.
 - Enforce file/diagnostic caps while consuming partial results. Mark omitted items and `partial`; never silently stop collection and report complete.
-- Fallback sweep: deterministically discover regular files inside the selected root that match the server's configured extensions/filenames, honor `.gitignore`, extension ignores, size limits, and `maxFiles`, then synchronize/open and request each file sequentially for that client. Record evidence state independently per file. LRU-close documents normally after the sweep. Report eligible, checked, ignored, oversized, and omitted counts.
+- Fallback sweep: deterministically discover regular files inside the selected root that match the server's configured extensions/filenames, honor `.gitignore`, extension ignores, size limits, and `maxFiles`, then group by client. For a push-only client, synchronize/open up to `maxOpenDocuments` files as one pinned batch and register all per-URI waits concurrently under the tool call's one absolute `waitMs` deadline; process larger inventories in deterministic chunks without resetting that deadline. Pull-only files may request sequentially, but every request receives only the deadline's remaining budget. Record evidence state independently per file and let normal LRU close documents between chunks. Report eligible, checked, ignored, oversized, and omitted counts.
+- `typescript-language-server` specialization: when the initialized server advertises the read-only `typescript.tsserverRequest` command, issue hard-coded `syntacticDiagnosticsSync`, `semanticDiagnosticsSync`, and `suggestionDiagnosticsSync` requests for synchronized files with bounded file concurrency. Successful complete responses are affirmative `typescript_tsserver_request` evidence and avoid temporal clean inference. Any unsupported, rejected, malformed, cancelled, or expired response falls back to generic push evidence; it is never interpreted as clean.
 
 ### Cache
 
@@ -972,7 +973,7 @@ Do not run `git`, create commits, or modify user history as part of a transactio
 
 - Different server/root clients may process requests concurrently.
 - Document synchronization is serialized per URI/client.
-- Default diagnostic sweeps group files by client. Process one file at a time per client unless real-server tests establish safe bounded parallelism; run distinct clients concurrently.
+- Default diagnostic sweeps group files by client. Native workspace diagnostics run once per group; push-only files are batch-opened and observed concurrently; the TypeScript synchronous-diagnostic specialization uses bounded file concurrency; pull-only per-file requests remain sequential unless a real-server test establishes safe bounded parallelism. Distinct clients run concurrently, but all groups share one absolute tool-call deadline.
 - Workspace symbol and navigation requests may coexist if the server supports it, but cap active requests per client.
 - Mutation requests acquire a workspace transaction lock and affected file queues.
 - Tool `AbortSignal` must cancel manager acquisition, sync, request, settle waits, diff generation, and pre-publication validation. Pi file-mutation queue acquisition is non-abortable; cancellation is checked inside each acquired callback and before publication as specified in Section 22.4.

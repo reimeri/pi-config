@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DiagnosticService } from "../../src/protocol/diagnostics.js";
@@ -82,6 +82,25 @@ describe("truthful diagnostics", () => {
     } finally { await client.shutdown(); }
   });
 
+  it("cancels every pending waiter in a push batch", async () => {
+    const { root, path } = await fixture("const first = 1;\n");
+    const second = join(root, "b.ts"); const third = join(root, "c.ts");
+    await writeFile(second, "const second = 2;\n"); await writeFile(third, "const third = 3;\n");
+    const client = await fakeClient(root, { FAKE_LSP_NO_PULL: "1" });
+    const service = new DiagnosticService();
+    try {
+      await client.start(); service.observe(client);
+      const checkpoint = service.checkpoint(client);
+      const snapshots = await Promise.all([path, second, third].map((file) => client.documents!.sync(file)));
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 20);
+      const started = Date.now();
+      const result = await service.checkPushBatch(client, snapshots, Date.now() + 1_000, true, controller.signal, checkpoint);
+      expect(Date.now() - started).toBeLessThan(300);
+      expect([...result.values()].every((evidence) => evidence.state === "cancelled")).toBe(true);
+    } finally { await client.shutdown(); }
+  });
+
   it("distinguishes silent and provisional unversioned empty push results", async () => {
     const silentFixture = await fixture("const value = 1;\n");
     const silent = await fakeClient(silentFixture.root);
@@ -105,6 +124,105 @@ describe("truthful diagnostics", () => {
       expect(result.state).toBe("unconfirmed");
       expect(result.possiblyStale).toBe(true);
     } finally { await push.shutdown(); }
+  });
+
+  it("uses and caches affirmative synchronous TypeScript diagnostics without the push grace", async () => {
+    const { root, path } = await fixture("const ERROR = 1;\n");
+    const executeLog = join(root, "execute.log");
+    const client = await fakeClient(root, {
+      FAKE_LSP_NO_PULL: "1",
+      FAKE_LSP_TS_REQUEST: "1",
+      FAKE_LSP_SERVER_NAME: "typescript-language-server",
+      FAKE_LSP_EXECUTE_LOG: executeLog,
+    }, { id: "typescript", diagnosticPolicy: { pushFirstMs: 10_000, settleMs: 5, acceptUnversionedEmptyAfterOpen: true } });
+    const service = new DiagnosticService();
+    try {
+      await client.start(); service.observe(client);
+      const checkpoint = service.checkpoint(client);
+      const snapshot = await client.documents!.sync(path);
+      const started = Date.now();
+      const result = (await service.checkPushBatch(client, [snapshot], Date.now() + 1_000, true, undefined, checkpoint)).get(snapshot.uri)!;
+      expect(Date.now() - started).toBeLessThan(500);
+      expect(result).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
+      expect(result.diagnostics[0]).toMatchObject({ message: "fake tsserver semantic error", code: 9001, range: { start: { line: 0, character: 6 } } });
+
+      const cached = (await service.checkPushBatch(client, [snapshot], Date.now() + 100, false, undefined, service.checkpoint(client))).get(snapshot.uri)!;
+      expect(cached).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
+      expect((await readFile(executeLog, "utf8")).trim().split("\n")).toHaveLength(3);
+
+      const refreshed = (await service.checkPushBatch(client, [snapshot], Date.now() + 1_000, true, undefined, service.checkpoint(client))).get(snapshot.uri)!;
+      expect(refreshed).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
+      expect((await readFile(executeLog, "utf8")).trim().split("\n")).toHaveLength(6);
+
+      const aborted = new AbortController(); aborted.abort();
+      await expect(service.checkPushBatch(client, [snapshot], Date.now() + 1_000, false, aborted.signal, service.checkpoint(client))).rejects.toThrow(/cancel/i);
+    } finally { await client.shutdown(); }
+  });
+
+  it("preserves completed TypeScript evidence when another file consumes the shared deadline", async () => {
+    const { root, path } = await fixture("const ERROR = 1;\n");
+    const second = join(root, "second.ts"); const hung = join(root, "hung.ts");
+    await writeFile(second, "const value = 1;\n"); await writeFile(hung, "const waiting = 1;\n");
+    const client = await fakeClient(root, {
+      FAKE_LSP_NO_PULL: "1",
+      FAKE_LSP_TS_REQUEST: "1",
+      FAKE_LSP_TS_REQUEST_HANG_URI_SUFFIX: "hung.ts",
+      FAKE_LSP_SERVER_NAME: "typescript-language-server",
+    }, { id: "typescript" });
+    const service = new DiagnosticService();
+    try {
+      await client.start(); service.observe(client);
+      const checkpoint = service.checkpoint(client);
+      const snapshots = await Promise.all([path, second, hung].map((file) => client.documents!.sync(file)));
+      const result = await service.checkPushBatch(client, snapshots, Date.now() + 100, true, undefined, checkpoint);
+      expect(result.get(snapshots[0]!.uri)).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
+      expect(result.get(snapshots[1]!.uri)).toMatchObject({ state: "clean", confirmation: "typescript_tsserver_request" });
+      expect(result.get(snapshots[2]!.uri)?.state).toBe("timed_out");
+    } finally { await client.shutdown(); }
+  });
+
+  it("preserves completed TypeScript evidence when a sibling is cancelled", async () => {
+    const { root, path } = await fixture("const ERROR = 1;\n");
+    const hung = join(root, "hung.ts"); await writeFile(hung, "const waiting = 1;\n");
+    const client = await fakeClient(root, {
+      FAKE_LSP_NO_PULL: "1",
+      FAKE_LSP_TS_REQUEST: "1",
+      FAKE_LSP_TS_REQUEST_HANG_URI_SUFFIX: "hung.ts",
+      FAKE_LSP_SERVER_NAME: "typescript-language-server",
+    }, { id: "typescript" });
+    const service = new DiagnosticService();
+    try {
+      await client.start(); service.observe(client);
+      const checkpoint = service.checkpoint(client);
+      const snapshots = await Promise.all([path, hung].map((file) => client.documents!.sync(file)));
+      const controller = new AbortController(); setTimeout(() => controller.abort(), 100);
+      const result = await service.checkPushBatch(client, snapshots, Date.now() + 1_000, true, controller.signal, checkpoint);
+      expect(result.get(snapshots[0]!.uri)).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
+      expect(result.get(snapshots[1]!.uri)?.state).toBe("cancelled");
+    } finally { await client.shutdown(); }
+  });
+
+  it.each([
+    ["malformed", { FAKE_LSP_TS_REQUEST_MALFORMED: "1" }],
+    ["rejected", { FAKE_LSP_TS_REQUEST_REJECT: "1" }],
+  ])("falls back truthfully to push evidence when a TypeScript diagnostic response is %s", async (_label, failureEnv) => {
+    const { root, path } = await fixture("const value = 1;\n");
+    const client = await fakeClient(root, {
+      FAKE_LSP_NO_PULL: "1",
+      FAKE_LSP_PUSH: "1",
+      FAKE_LSP_UNVERSIONED: "1",
+      FAKE_LSP_TS_REQUEST: "1",
+      ...failureEnv,
+      FAKE_LSP_SERVER_NAME: "typescript-language-server",
+    }, { id: "typescript", diagnosticPolicy: { pushFirstMs: 20, settleMs: 5, acceptUnversionedEmptyAfterOpen: true } });
+    const service = new DiagnosticService();
+    try {
+      await client.start(); service.observe(client);
+      const checkpoint = service.checkpoint(client);
+      const snapshot = await client.documents!.sync(path);
+      const result = (await service.checkPushBatch(client, [snapshot], Date.now() + 500, true, undefined, checkpoint)).get(snapshot.uri)!;
+      expect(result).toMatchObject({ state: "clean", confirmation: "post_open_server_policy" });
+    } finally { await client.shutdown(); }
   });
 
   it("confirms only an initial post-open unversioned empty under an explicit server policy", async () => {

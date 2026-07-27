@@ -13,6 +13,7 @@ import type { DocumentSnapshot } from "../runtime/document-store.js";
 import type { DiagnosticEvidence } from "../protocol/diagnostics.js";
 import type { LspClient } from "../protocol/client.js";
 import { sanitizeText } from "../util/text.js";
+import { TimeoutError } from "../util/async.js";
 
 interface Inventory extends DiscoveryResult { omittedUnknown?: boolean }
 interface WorkItem { file: string; route: Route }
@@ -43,7 +44,15 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
         if (!work.length) return envelope("No configured language server matches the selected files.", { ...baseDetails("diagnostics", "no_results", started), files: [], discovery: inventory });
         const groups = groupWork(work);
         const concurrency = Math.max(1, Math.min(4, runtime.loaded.config.limits.maxClients, groups.length));
-        const groupResults = await mapConcurrent(groups, concurrency, (group) => runDiagnosticGroup(runtime, group, mode, waitMs, params.refresh ?? false, signal));
+        const deadlineAt = Date.now() + waitMs;
+        const deadlineController = new AbortController();
+        const deadlineTimer = setTimeout(() => deadlineController.abort(new TimeoutError(`Diagnostic collection timed out after ${waitMs}ms`)), waitMs);
+        deadlineTimer.unref?.();
+        const operationSignal = signal ? AbortSignal.any([signal, deadlineController.signal]) : deadlineController.signal;
+        let groupResults: GroupDiagnosticResult[];
+        try {
+          groupResults = await mapConcurrent(groups, concurrency, (group) => runDiagnosticGroup(runtime, group, mode, deadlineAt, params.refresh ?? false, operationSignal));
+        } finally { clearTimeout(deadlineTimer); }
         const rawEvidence = groupResults.flatMap((result) => result.evidence);
         const serverRuns = groupResults.map((result) => result.run);
         const omittedWorkspaceReports = groupResults.reduce((total, result) => total + result.omittedWorkspaceReports, 0);
@@ -131,18 +140,23 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
   });
 }
 
-async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mode: string, waitMs: number, refresh: boolean, signal?: AbortSignal): Promise<GroupDiagnosticResult> {
+async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mode: string, deadlineAt: number, refresh: boolean, signal?: AbortSignal): Promise<GroupDiagnosticResult> {
   const started = Date.now();
   const evidence: RawEvidence[] = [];
   let omittedWorkspaceReports = 0;
   let client: LspClient | undefined;
+  const remainingMs = (): number => Math.max(0, deadlineAt - Date.now());
   try {
+    if (remainingMs() <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed before server acquisition");
     const acquired = await runtime.manager.acquire(group.route, signal);
     client = acquired;
     runtime.diagnostics.observe(acquired);
+    if (remainingMs() <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed during server acquisition");
     if (mode === "workspace" && acquired.capabilities?.diagnostics.workspace) {
       await acquired.documents!.withSynchronizedDocuments(group.items.map((item) => item.file), signal, async (snapshots) => {
-        const results = await runtime.diagnostics.checkWorkspace(acquired, snapshots, waitMs, refresh, signal);
+        const remaining = remainingMs();
+        if (remaining <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed during document synchronization");
+        const results = await runtime.diagnostics.checkWorkspace(acquired, snapshots, remaining, refresh, signal);
         omittedWorkspaceReports += results.omittedReports;
         const byPath = new Map(snapshots.map((snapshot) => [snapshot.canonicalPath, snapshot] as const));
         for (const item of group.items) {
@@ -150,19 +164,37 @@ async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mod
           evidence.push({ item, client: acquired, snapshot, result: results.evidence.get(snapshot.uri) ?? { state: "unconfirmed", diagnostics: [], message: "No workspace diagnostic evidence" } });
         }
       });
+    } else if (!acquired.capabilities?.diagnostics.pull) {
+      const chunkSize = Math.max(1, runtime.loaded.config.limits.maxOpenDocuments);
+      for (let offset = 0; offset < group.items.length; offset += chunkSize) {
+        const chunk = group.items.slice(offset, offset + chunkSize);
+        if (remainingMs() <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed before the push-diagnostic batch completed");
+        const checkpoint = runtime.diagnostics.checkpoint(acquired);
+        await acquired.documents!.withSynchronizedDocuments(chunk.map((item) => item.file), signal, async (snapshots) => {
+          const results = await runtime.diagnostics.checkPushBatch(acquired, snapshots, deadlineAt, refresh, signal, checkpoint);
+          const byPath = new Map(snapshots.map((snapshot) => [snapshot.canonicalPath, snapshot] as const));
+          for (const item of chunk) {
+            const snapshot = byPath.get(item.file)!;
+            evidence.push({ item, client: acquired, snapshot, result: results.get(snapshot.uri) ?? { state: "unconfirmed", diagnostics: [], message: "No push diagnostic evidence" } });
+          }
+        });
+      }
     } else {
       for (const item of group.items) {
+        const remaining = remainingMs();
+        if (remaining <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed before the per-file diagnostic sweep completed");
         const checkpoint = runtime.diagnostics.checkpoint(acquired);
         await acquired.documents!.withSynchronizedDocument(item.file, signal, async (snapshot) => {
-          evidence.push({ item, client: acquired, snapshot, result: await runtime.diagnostics.check(acquired, snapshot, waitMs, refresh, signal, checkpoint) });
+          evidence.push({ item, client: acquired, snapshot, result: await runtime.diagnostics.check(acquired, snapshot, remaining, refresh, signal, checkpoint) });
         });
       }
     }
     return { evidence, run: { server: group.route.server.id, root: group.route.root, status: groupEvidenceStatus(evidence.map((entry) => entry.result.state)), durationMs: Date.now() - started }, omittedWorkspaceReports };
   } catch (error) {
-    const state = evidenceStateFromError(error);
+    const state = evidenceStateFromError(error, signal);
+    const message = signal?.reason instanceof TimeoutError ? signal.reason.message : error instanceof Error ? error.message : String(error);
     const completed = new Set(evidence.map((entry) => entry.item.file));
-    for (const item of group.items) if (!completed.has(item.file)) evidence.push({ item, result: { state, diagnostics: [], message: error instanceof Error ? error.message : String(error) } });
+    for (const item of group.items) if (!completed.has(item.file)) evidence.push({ item, result: { state, diagnostics: [], message } });
     return { evidence, run: { server: group.route.server.id, root: group.route.root, status: groupEvidenceStatus(evidence.map((entry) => entry.result.state)), durationMs: Date.now() - started }, omittedWorkspaceReports };
   } finally { if (client) runtime.manager.release(client); }
 }
@@ -261,7 +293,7 @@ function aggregateStatus(states: string[], affirmative: number): ToolStatus {
   if (new Set(states).size > 1) return "partial";
   return "no_results";
 }
-function evidenceStateFromError(error: unknown): DiagnosticEvidence["state"] { const status = statusFromError(error); return status === "timed_out" || status === "cancelled" || status === "unavailable" ? status : "error"; }
+function evidenceStateFromError(error: unknown, signal?: AbortSignal): DiagnosticEvidence["state"] { if (signal?.reason instanceof TimeoutError) return "timed_out"; const status = statusFromError(error); return status === "timed_out" || status === "cancelled" || status === "unavailable" ? status : "error"; }
 function severityMatches(diagnostic: Diagnostic, severity: string): boolean { const wanted: Record<string, number> = { error: 1, warning: 2, information: 3, hint: 4 }; return severity === "all" || diagnostic.severity === wanted[severity]; }
 /**
  * A push diagnostic is inherently asynchronous with respect to the snapshot we hold, so its range

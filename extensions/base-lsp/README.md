@@ -110,7 +110,9 @@ Gets diagnostics for changed files, explicit paths/directories, or a bounded wor
 }
 ```
 
-When supported, workspace mode uses `workspace/diagnostic`; otherwise it performs a deterministic server-affine sweep. Discovery honors configured ignores, size limits, file caps, and entry caps and reports omissions.
+When supported, workspace mode uses `workspace/diagnostic`; otherwise it performs a deterministic server-affine sweep. Push-only groups synchronize/open files in bounded batches and collect every file concurrently under one shared absolute deadline, so clean-settling and silence waits do not multiply by file count. Pull-only fallbacks also consume the same remaining deadline rather than receiving a fresh timeout per file. Discovery honors configured ignores, size limits, file caps, and entry caps and reports omissions.
+
+`waitMs` is the aggregate collection budget for the whole tool call after discovery/routing, including lazy client acquisition and all selected server/root groups. It is not a per-file allowance. When it expires, completed evidence is retained and unfinished files are reported as `timed_out` or `unconfirmed` rather than extending the call with another file/chunk timeout.
 
 Per-file evidence states are:
 
@@ -122,7 +124,7 @@ Per-file evidence states are:
 - `cancelled`;
 - `error`.
 
-Silence, timeout, an unmatched `unchanged` report, stale versioned publication, or an unversioned empty publication after a change is never converted to `clean`. For TypeScript only, an initial post-`didOpen` empty publication may confirm a clean version-1 document after the catalog's bounded settling period; results identify this as `confirmation: "post_open_server_policy"`. Unversioned non-empty publications can be returned as `possiblyStale: true`.
+Silence, timeout, an unmatched `unchanged` report, stale versioned publication, or an unversioned empty publication after a change is never converted to `clean`. For `typescript-language-server`, the extension first uses its advertised read-only `typescript.tsserverRequest` bridge to obtain affirmative synchronous syntactic, semantic, and suggestion diagnostics; these results carry `confirmation: "typescript_tsserver_request"` and do not pay an artificial push-settling delay. If that server-specific request is unavailable, rejected, malformed, or times out, the extension falls back to the generic push path. On that fallback only, an initial post-`didOpen` empty publication may confirm a clean version-1 document after one bounded batch-level settling period, identified as `confirmation: "post_open_server_policy"`. Unversioned non-empty publications can be returned as `possiblyStale: true`.
 
 ### `lsp_navigation`
 
@@ -291,7 +293,7 @@ No server, watcher, or process starts in the extension factory or `session_start
 - **Wrong server/root:** pass explicit `server`/`root`, inspect project markers, then `/lsp restart <id>` after marker changes.
 - **TypeScript cannot find TypeScript:** install both `typescript-language-server` and `typescript`, or configure `initializationOptions.tsserver.path`.
 - **Timeout or incomplete navigation:** let initial indexing finish, increase the bounded request timeout in user config, or inspect `/lsp status` progress/stderr.
-- **Unconfirmed diagnostics:** the server did not provide affirmative evidence. Retry with `refresh: true`; do not interpret it as clean. TypeScript initial clean files use a bounded post-open server policy, while later unversioned empty publications remain provisional. A push server's publication is accepted whenever it carries a version matching the synchronized document, even if it arrived before the request; only unversioned publications must postdate the request to count as evidence.
+- **Unconfirmed diagnostics:** the server did not provide affirmative evidence. Retry with `refresh: true`; do not interpret it as clean. `typescript-language-server` normally uses direct affirmative tsserver diagnostic requests; its bounded post-open empty policy is only a fallback. Later unversioned empty publications remain provisional. A push server's publication is accepted whenever it carries a version matching the synchronized document, even if it arrived before the request; only unversioned publications must postdate the request to count as evidence.
 - **Unsupported TypeScript declaration:** `typescript-language-server` does not advertise the LSP declaration method. Use an explicit definition request only when definition semantics are acceptable.
 - **Unavailable workspace servers:** implicit workspace scans summarize missing server/root groups while retaining per-file `unavailable` evidence and installation hints in structured details.
 - **Stale diagnostics after external edits:** explicit requests reread authoritative disk content. Use `refresh: true` or restart a misbehaving server.

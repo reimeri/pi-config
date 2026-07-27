@@ -21,19 +21,23 @@ describe("typescript-language-server smoke", () => {
   it("initializes, reuses documents, and resolves a definition", async () => {
     const root = await mkdtemp(join(tmpdir(), "base-lsp-ts-"));
     await writeFile(join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, module: "NodeNext", moduleResolution: "NodeNext" }, include: ["*.ts"] }));
-    const a = join(root, "a.ts"); const b = join(root, "b.ts");
-    await writeFile(a, "export const x = 42;\n"); await writeFile(b, "import { x } from './a.js';\nconsole.log(x);\n");
+    const a = join(root, "a.ts"); const b = join(root, "b.ts"); const c = join(root, "c.ts");
+    await writeFile(a, "export const x = 42;\n"); await writeFile(b, "import { x } from './a.js';\nconsole.log(x);\n"); await writeFile(c, "const broken: string = 42;\n");
     const server = { ...BUILTIN_SERVERS.typescript!, initializationOptions: { tsserver: { path: join(process.cwd(), "node_modules", "typescript", "lib", "tsserver.js") } } }; const command = await resolveServerCommand(server); expect(command).toBeDefined();
     const client = new LspClient(server, root, command!, { ...DEFAULT_LIMITS, initializeTimeoutMs: 20_000, requestTimeoutMs: 20_000 });
     try {
       await client.start();
       const diagnostics = new DiagnosticService(); diagnostics.observe(client);
-      await client.documents!.sync(a); const checkpoint = diagnostics.checkpoint(client); const snapshot = await client.documents!.sync(b);
-      const clean = await diagnostics.check(client, snapshot, 10_000, true, undefined, checkpoint);
-      expect(clean).toMatchObject({ state: "clean", confirmation: "post_open_server_policy" });
+      await client.documents!.sync(a); const checkpoint = diagnostics.checkpoint(client); const snapshot = await client.documents!.sync(b); const broken = await client.documents!.sync(c);
+      const started = Date.now();
+      const batch = await diagnostics.checkPushBatch(client, [snapshot, broken], Date.now() + 10_000, true, undefined, checkpoint);
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(batch.get(snapshot.uri)).toMatchObject({ state: "clean", confirmation: "typescript_tsserver_request" });
+      expect(batch.get(broken.uri)).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
+      expect(batch.get(broken.uri)?.diagnostics.some((diagnostic) => diagnostic.code === 2322)).toBe(true);
       const result = await client.request<any>("textDocument/definition", { textDocument: { uri: snapshot.uri }, position: { line: 1, character: 12 } });
       expect(result).toBeTruthy(); expect(JSON.stringify(result)).toContain("a.ts");
-      expect(client.status().openDocuments).toBe(2);
+      expect(client.status().openDocuments).toBe(3);
     } finally { await client.shutdown(); }
   }, 30_000);
 

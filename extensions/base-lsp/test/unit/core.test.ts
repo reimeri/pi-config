@@ -11,6 +11,7 @@ import { defaultConfig } from "../../src/config/defaults.js";
 import { mergeConfig } from "../../src/config/loader.js";
 import { validateConfigFile } from "../../src/config/schema.js";
 import { isTypeScriptLanguageServer } from "../../src/servers/implementation.js";
+import { normalizeCapabilities } from "../../src/protocol/types.js";
 
 async function temp(): Promise<string> { return mkdtemp(join(tmpdir(), "base-lsp-")); }
 
@@ -67,6 +68,15 @@ describe("boundary, roots and routing", () => {
     expect(routed.primary?.root).toBe(join(root, "packages", "a"));
     const outside = await temp(); await writeFile(join(outside, "secret.ts"), ""); await symlink(join(outside, "secret.ts"), join(root, "escape.ts"));
     await expect(resolveInputPath("escape.ts", root, root)).rejects.toThrow(/outside/);
+  });
+});
+
+describe("capability normalization", () => {
+  it("retains only string execute commands from a valid array", () => {
+    expect(normalizeCapabilities({ executeCommandProvider: { commands: ["typescript.tsserverRequest", 42 as any] } }).executeCommands).toEqual(["typescript.tsserverRequest"]);
+    expect(normalizeCapabilities({ executeCommandProvider: { commands: null as any } }).executeCommands).toEqual([]);
+    expect(normalizeCapabilities({ executeCommandProvider: { commands: "not-an-array" as any } }).executeCommands).toEqual([]);
+    expect(normalizeCapabilities({}).executeCommands).toEqual([]);
   });
 });
 
