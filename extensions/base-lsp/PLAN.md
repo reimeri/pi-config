@@ -783,7 +783,7 @@ The request layer must:
 - Ignore late responses to cancelled requests without corrupting later requests.
 - Bound partial-result collection.
 - Treat malformed protocol messages and impossible content lengths as fatal to that client.
-- Implement a `BoundedStreamMessageReader` compatible with `vscode-jsonrpc`'s `MessageReader` interface. It must parse and cap header bytes and `Content-Length` before buffering a body, reject frames over the configured body limit, and cap the number of buffered incomplete frames. Do not use the library's default stream reader unless an audited version exposes equivalent pre-allocation limits. Add memory-oriented tests for oversized headers, declared bodies, and fragmented floods.
+- Implement a `BoundedStreamMessageReader` compatible with `vscode-jsonrpc`'s `MessageReader` interface. It must parse and cap header bytes and `Content-Length` before buffering a body, reject frames over the configured body limit, and bound the bytes retained for the incomplete frame. (The reader drains every complete frame from its buffer as it arrives, so at most one incomplete frame is ever retained; the header and body byte caps are that bound. A separate count of frames would only measure throughput, so no such limit is configured.) Do not use the library's default stream reader unless an audited version exposes equivalent pre-allocation limits. Add memory-oriented tests for oversized headers, declared bodies, and fragmented floods.
 
 ## 18. Document synchronization
 

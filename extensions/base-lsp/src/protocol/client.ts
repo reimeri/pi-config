@@ -49,7 +49,6 @@ export class LspClient {
       const reader = new BoundedStreamMessageReader(this.process.child.stdout, {
         maxHeaderBytes: this.limits.maxFrameHeaderBytes,
         maxBodyBytes: this.limits.maxFrameBodyBytes,
-        maxBufferedFrames: this.limits.maxBufferedFrames,
       });
       reader.onError((error) => { this.failTransport(error); });
       const writer = new StreamMessageWriter(this.process.child.stdin);
@@ -99,7 +98,15 @@ export class LspClient {
 
   onDiagnostics(listener: (params: PublishDiagnosticsParams) => void): () => void { this.diagnosticListeners.add(listener); return () => this.diagnosticListeners.delete(listener); }
   onDiagnosticRefresh(listener: () => void): () => void { this.diagnosticRefreshListeners.add(listener); return () => this.diagnosticRefreshListeners.delete(listener); }
-  onStop(listener: () => void): () => void { this.stopListeners.add(listener); return () => this.stopListeners.delete(listener); }
+  /**
+   * Fires once. A listener registered after the client has already stopped is invoked immediately:
+   * the stop it was waiting for has happened, and a listener parked in the cleared set would never
+   * run, silently stranding whatever state it was meant to release.
+   */
+  onStop(listener: () => void): () => void {
+    if (this.stoppedEmitted) { listener(); return () => undefined; }
+    this.stopListeners.add(listener); return () => this.stopListeners.delete(listener);
+  }
   async forceTerminate(): Promise<void> { await this.forceStop("stopped"); }
   status(): ClientStatus {
     return {

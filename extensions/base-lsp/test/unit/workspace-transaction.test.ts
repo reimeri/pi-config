@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { normalizeWorkspaceEdit } from "../../src/workspace/edits.js";
 import { applyManifest } from "../../src/workspace/transaction.js";
+import { renderManifest } from "../../src/workspace/diff.js";
 import { DEFAULT_LIMITS } from "../../src/runtime/limits.js";
 
 async function rootWithFiles() {
@@ -79,5 +80,26 @@ describe("workspace edit safety", () => {
     controller.abort(); release(); await blocker;
     await expect(applying).rejects.toMatchObject({ name: "CancelledError" });
     expect(await readFile(a, "utf8")).toBe("const alpha = 1;\n");
+  });
+});
+
+describe("diff preview", () => {
+  function staged(original: string, updated: string) {
+    return { files: [{ path: "/root/a.ts", uri: "file:///root/a.ts", original, updated, hash: "h", mode: 0o644, mtimeMs: 0, edits: 1 }], totalEdits: 1, resourceOperations: [], applicable: true, reasons: [], fingerprint: "f" };
+  }
+
+  it("shows an edit that only changes the trailing newline", () => {
+    const added = renderManifest(staged("alpha", "alpha\n"), 40_000, "/root").text;
+    expect(added).toContain("-alpha\n\\ No newline at end of file\n");
+    expect(added).toContain("+alpha\n");
+    const removed = renderManifest(staged("alpha\n", "alpha"), 40_000, "/root").text;
+    expect(removed).toContain("+alpha\n\\ No newline at end of file\n");
+  });
+
+  it("leaves an ordinary hunk unmarked", () => {
+    const text = renderManifest(staged("alpha\nbeta\n", "alpha\ngamma\n"), 40_000, "/root").text;
+    expect(text).toContain("-beta\n");
+    expect(text).toContain("+gamma\n");
+    expect(text).not.toContain("No newline");
   });
 });

@@ -242,17 +242,19 @@ export class DiagnosticService {
     });
     const disposeRefresh = client.onDiagnosticRefresh(() => this.invalidate(client));
     let disposed = false;
-    let state!: ClientDiagnosticState;
-    const disposeStop = client.onStop(() => state.dispose());
-    state = { pushes, waiters, reports, confirmed, sequence: 0, dispose: () => {
+    let disposeStop: (() => void) | undefined;
+    const state: ClientDiagnosticState = { pushes, waiters, reports, confirmed, sequence: 0, dispose: () => {
       if (disposed) return;
       disposed = true;
-      disposeDiagnostics(); disposeRefresh(); disposeStop();
+      disposeDiagnostics(); disposeRefresh(); disposeStop?.();
       pushes.clear(); waiters.clear(); reports.clear(); confirmed.clear();
       this.clients.delete(client); this.states.delete(state);
     } };
     this.clients.set(client, state);
     this.states.add(state);
+    // Subscribed last, once the state is fully built and registered: for a client that has already
+    // stopped this callback runs synchronously, and it must find a state it can actually release.
+    disposeStop = client.onStop(() => state.dispose());
     return state;
   }
 }

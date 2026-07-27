@@ -11,7 +11,7 @@ import { DEFAULT_LIMITS } from "../../src/runtime/limits.js";
 
 describe("bounded protocol reader", () => {
   it("handles fragmented/combined frames and rejects oversized bodies", async () => {
-    const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 100, maxBodyBytes: 100, maxBufferedFrames: 4 });
+    const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 100, maxBodyBytes: 100 });
     const messages: any[] = []; const errors: Error[] = []; reader.onError((error) => errors.push(error)); reader.listen((message) => messages.push(message));
     const body = JSON.stringify({ jsonrpc: "2.0", method: "x" }); const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
     stream.write(frame.slice(0, 10)); stream.write(frame.slice(10) + frame); await new Promise((resolve) => setImmediate(resolve));
@@ -20,7 +20,7 @@ describe("bounded protocol reader", () => {
   });
 
   it("accepts bursts of many complete frames without confusing throughput with buffering", async () => {
-    const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 100, maxBodyBytes: 100, maxBufferedFrames: 4 });
+    const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 100, maxBodyBytes: 100 });
     const messages: any[] = []; const errors: Error[] = []; reader.onError((error) => errors.push(error)); reader.listen((message) => messages.push(message));
     const frames = Array.from({ length: 25 }, (_, id) => { const body = JSON.stringify({ jsonrpc: "2.0", id, result: null }); return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`; }).join("");
     stream.write(frames); await new Promise((resolve) => setImmediate(resolve));

@@ -98,9 +98,14 @@ async function resultFor(method, params) {
         { title: "Fix ERROR", kind: "quickfix", data: { uri: params.textDocument.uri, mode: "valid" } },
         { title: "Malformed fix", kind: "quickfix", data: { uri: params.textDocument.uri, mode: "malformed" } },
       ];
+      if (mode === "mixed-null-resolve") return [
+        { title: "Fix ERROR", kind: "quickfix", data: { uri: params.textDocument.uri, mode: "valid" } },
+        { title: "Unresolvable fix", kind: "quickfix", data: { uri: params.textDocument.uri, mode: "null" } },
+      ];
       return [{ title: "Fix ERROR", kind: mode === "format" ? "source.format.fake" : "quickfix", data: { uri: params.textDocument.uri, mode } }];
     }
     case "codeAction/resolve": {
+      if (params.data.mode === "null") return null;
       const action = { ...params, edit: replacementEdit(params.data.uri, "ERROR", "fixed") };
       if (params.data.mode === "malformed") action.edit = { documentChanges: [{ textDocument: { uri: params.data.uri, version: documents.get(params.data.uri)?.version ?? 1 }, edits: [{ range: range(0, 999, 0, 999), newText: "broken" }] }] };
       if (params.data.mode === "both") action.command = { title: "Follow-up", command: "fake.command" };

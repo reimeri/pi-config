@@ -24,9 +24,9 @@ function renderFileDiff(file: StagedFile, path: string): string {
   const before = splitLines(file.original);
   const after = splitLines(file.updated);
   let prefix = 0;
-  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix += 1;
+  while (prefix < before.length && prefix < after.length && sameLine(before[prefix]!, after[prefix]!)) prefix += 1;
   let suffix = 0;
-  while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1;
+  while (suffix < before.length - prefix && suffix < after.length - prefix && sameLine(before[before.length - 1 - suffix]!, after[after.length - 1 - suffix]!)) suffix += 1;
   const oldStart = Math.max(0, prefix - 3);
   const newStart = Math.max(0, prefix - 3);
   const oldChangeEnd = before.length - suffix;
@@ -34,10 +34,24 @@ function renderFileDiff(file: StagedFile, path: string): string {
   const oldEnd = Math.min(before.length, oldChangeEnd + 3);
   const newEnd = Math.min(after.length, newChangeEnd + 3);
   let diff = `--- a/${path}\n+++ b/${path}\n@@ -${oldStart + 1},${Math.max(0, oldEnd - oldStart)} +${newStart + 1},${Math.max(0, newEnd - newStart)} @@\n`;
-  for (let index = oldStart; index < prefix; index += 1) diff += ` ${before[index]}\n`;
-  for (let index = prefix; index < oldChangeEnd; index += 1) diff += `-${before[index]}\n`;
-  for (let index = prefix; index < newChangeEnd; index += 1) diff += `+${after[index]}\n`;
-  for (let offset = 0; offset < Math.min(3, suffix); offset += 1) diff += ` ${before[oldChangeEnd + offset]}\n`;
+  for (let index = oldStart; index < prefix; index += 1) diff += renderLine(" ", before[index]!);
+  for (let index = prefix; index < oldChangeEnd; index += 1) diff += renderLine("-", before[index]!);
+  for (let index = prefix; index < newChangeEnd; index += 1) diff += renderLine("+", after[index]!);
+  for (let offset = 0; offset < Math.min(3, suffix); offset += 1) diff += renderLine(" ", before[oldChangeEnd + offset]!);
   return diff;
 }
-function splitLines(text: string): string[] { const lines = text.split(/\r?\n/); if (lines.at(-1) === "") lines.pop(); return lines; }
+
+/**
+ * A line plus whether it ends the text without a final newline. Presence of that newline is part of
+ * the content an edit can change, so it participates in the comparison: otherwise an edit that only
+ * adds or removes a trailing newline renders as a hunk with no changed lines at all.
+ */
+interface DiffLine { text: string; endsWithoutNewline: boolean }
+function sameLine(left: DiffLine, right: DiffLine): boolean { return left.text === right.text && left.endsWithoutNewline === right.endsWithoutNewline; }
+function renderLine(marker: string, line: DiffLine): string { return `${marker}${line.text}\n${line.endsWithoutNewline ? "\\ No newline at end of file\n" : ""}`; }
+function splitLines(text: string): DiffLine[] {
+  const lines = text.split(/\r?\n/);
+  const terminated = lines.at(-1) === "";
+  if (terminated) lines.pop();
+  return lines.map((line, index) => ({ text: line, endsWithoutNewline: !terminated && index === lines.length - 1 }));
+}

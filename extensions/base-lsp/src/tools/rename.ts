@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { renameSchema, type RenameInput } from "./schemas.js";
 import type { RuntimeGetter } from "./context.js";
-import { acquireSource } from "./context.js";
+import { acquireSource, rememberPreview } from "./context.js";
 import { baseDetails, envelope, rethrowUnexpected, statusFromError } from "./results.js";
 import type { Range, WorkspaceEdit } from "../protocol/types.js";
 import { normalizeWorkspaceEdit, type EditManifest } from "../workspace/edits.js";
@@ -62,12 +62,15 @@ export function registerRenameTool(pi: ExtensionAPI, getRuntime: RuntimeGetter):
         if (params.apply) {
           if (!stable) throw new Error(unstableReason);
           if (renameId !== params.renameId) throw new Error("Fresh rename response does not match the previewed renameId");
-          const changed = await applyManifest(manifest, signal); for (const path of changed) { runtime.changed.add(path); await runtime.manager.syncActiveFile(path, signal, true); }
+          // Consumed only once the edit is on disk, so a transient failure leaves the preview usable
+          // while a completed rename cannot be replayed from the same token.
+          const changed = await applyManifest(manifest, signal); runtime.previewRenames.delete(params.renameId!);
+          for (const path of changed) { runtime.changed.add(path); await runtime.manager.syncActiveFile(path, signal, true); }
           return envelope(`Renamed symbol to ${params.newName} in ${changed.length} file(s).`, { ...baseDetails("rename", "ok", started), server: source.route.server.id, root: source.route.root, renameId, applied: true, changed, stable, attempts });
         }
         const applicable = manifest.applicable && stable;
         const reasons = stable ? manifest.reasons : [...manifest.reasons, unstableReason];
-        if (applicable) runtime.previewRenames.add(renameId);
+        if (applicable) rememberPreview(runtime.previewRenames, renameId);
         const preview = renderManifest(manifest, 40_000, source.route.root);
         const status = !stable ? "partial" : manifest.files.length ? "ok" : "no_results";
         return envelope(`renameId: ${renameId}\n${stable ? "" : `${unstableReason}\n`}${preview.text}`, { ...baseDetails("rename", status, started), server: source.route.server.id, root: source.route.root, renameId, applicable, reasons, files: manifest.files.map((file) => ({ path: relative(source.route.root, file.path) || ".", edits: file.edits })), totalEdits: manifest.totalEdits, preview: preview.text, truncated: preview.truncated, stable, attempts, possiblyIncomplete: source.client.progress.size > 0, warnings: stable ? [] : [unstableReason] });

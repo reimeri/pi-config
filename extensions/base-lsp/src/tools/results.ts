@@ -89,8 +89,15 @@ function cloneBounded(input: unknown, limits: CloneLimits): { value: BaseDetails
     if (typeof value === "bigint") { truncated = true; return value.toString(); }
     if (value === undefined) return undefined;
     if (Array.isArray(value)) {
+      if (seen.has(value)) { truncated = true; return "[omitted: circular value]"; }
       if (value.length > limits.maxArray) truncated = true;
-      return value.slice(0, limits.maxArray).map((item) => visit(item, depth + 1));
+      // Only the path from the root is marked, so a value reachable twice is cloned twice rather
+      // than reported as a cycle. Details routinely share references (one snapshot cited by several
+      // locations), and calling that circular would omit data the caller does have.
+      seen.add(value);
+      const output = value.slice(0, limits.maxArray).map((item) => visit(item, depth + 1));
+      seen.delete(value);
+      return output;
     }
     if (typeof value === "object") {
       if (seen.has(value)) { truncated = true; return "[omitted: circular value]"; }
@@ -102,6 +109,7 @@ function cloneBounded(input: unknown, limits: CloneLimits): { value: BaseDetails
         const visited = visit(item, depth + 1);
         if (visited !== undefined) output[key] = visited;
       }
+      seen.delete(value);
       return output;
     }
     truncated = true;

@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { codeActionsSchema, type CodeActionsInput } from "./schemas.js";
 import type { RuntimeGetter } from "./context.js";
-import { acquireSource } from "./context.js";
+import { acquireSource, rememberPreview } from "./context.js";
 import { baseDetails, envelope, rethrowUnexpected, statusFromError } from "./results.js";
 import type { CodeAction, Command } from "../protocol/types.js";
 import { publicToServerPosition } from "../protocol/positions.js";
@@ -19,7 +19,6 @@ export function registerCodeActionsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
       try {
         if (params.apply && !params.actionId) throw new Error("apply requires actionId from a prior preview");
         if (params.apply && !runtime.previewActions.has(params.actionId!)) throw new Error("actionId was not previewed in this session");
-        if (params.apply) runtime.previewActions.delete(params.actionId!);
         if (params.endCharacter !== undefined && params.endLine === undefined) throw new Error("endCharacter requires endLine");
         const source = await acquireSource(runtime, { path: params.path, line: params.line, ...(params.character ? { character: params.character } : {}), ...(params.symbol ? { symbol: params.symbol } : {}), ...(params.server ? { server: params.server } : {}), ...(params.root ? { root: params.root } : {}) }, signal);
         try {
@@ -41,10 +40,21 @@ export function registerCodeActionsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
           let action = isCodeAction(raw) ? raw : { title: raw.title, command: raw };
           let manifest: EditManifest | undefined;
           let normalizationError: string | undefined;
-          if (action.data !== undefined && capabilities.codeActionResolve) action = await source.client.request<CodeAction>("codeAction/resolve", action, signal);
           try {
+            // Resolution is per candidate: a server that answers `null` or nonsense for one action
+            // marks that action malformed and leaves the others intact, which is the whole point of
+            // classifying each candidate separately.
+            if (action.data !== undefined && capabilities.codeActionResolve) {
+              const resolved = await source.client.request<CodeAction | null>("codeAction/resolve", action, signal);
+              if (!resolved || typeof resolved !== "object" || typeof resolved.title !== "string") throw new Error("codeAction/resolve returned no usable action");
+              action = resolved;
+            }
             if (action.edit) manifest = await normalizeWorkspaceEdit(action.edit, runtime.boundary, capabilities.positionEncoding, runtime.loaded.config.limits, documentVersions, documentSnapshots);
           } catch (error) {
+            // Cancellation and timeouts end the whole request; only a genuine server-data fault
+            // demotes a single candidate.
+            const status = statusFromError(error);
+            if (status === "cancelled" || status === "timed_out") throw error;
             normalizationError = error instanceof Error ? error.message : String(error);
           }
           const formatting = action.kind?.startsWith("source.format") ?? false;
@@ -61,12 +71,16 @@ export function registerCodeActionsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
           const matches = candidates.filter((candidate) => candidate.actionId === params.actionId);
           if (matches.length !== 1) throw new Error("Fresh code-action response did not contain exactly one matching actionId");
           const selected = matches[0]!; if (!selected.supported || !selected.manifest) throw new Error(selected.reason ?? "Action cannot be applied");
-          const changed = await applyManifest(selected.manifest, signal); for (const path of changed) { runtime.changed.add(path); await runtime.manager.syncActiveFile(path, signal, true); }
+          // Consumed only once the edit is on disk. Burning the token on a transient failure — an
+          // unavailable server, a stale revalidation — would force a needless second preview of an
+          // action that was never applied.
+          const changed = await applyManifest(selected.manifest, signal); runtime.previewActions.delete(selected.actionId);
+          for (const path of changed) { runtime.changed.add(path); await runtime.manager.syncActiveFile(path, signal, true); }
           return envelope(`Applied ${selected.action.title} to ${changed.length} file(s).`, { ...baseDetails("code_actions", "ok", started), server: source.route.server.id, root: source.route.root, actionId: selected.actionId, applied: true, changed, commandDisposition: selected.commandDisposition, commandExecuted: false });
         }
         const selected = params.title && candidates.length === 1 ? candidates[0] : undefined;
         const preview = selected?.manifest ? renderManifest(selected.manifest, 40_000, source.route.root) : undefined;
-        if (selected?.manifest && selected.supported) runtime.previewActions.add(selected.actionId);
+        if (selected?.manifest && selected.supported) rememberPreview(runtime.previewActions, selected.actionId);
         const text = selected ? `${selected.action.title} [${selected.supported ? "applicable" : selected.reason}]\nactionId: ${selected.actionId}\n${preview?.text ?? ""}` : candidates.map((candidate) => `${candidate.actionId} ${candidate.action.title} (${candidate.action.kind ?? "action"})${candidate.reason ? ` [${candidate.reason}]` : ""}`).join("\n") || "No code actions.";
         const malformedActions = candidates.filter((candidate) => candidate.normalizationError).length;
         const status = params.title && candidates.length > 1 ? "ambiguous" : candidates.length ? malformedActions ? "partial" : "ok" : "no_results";

@@ -19,7 +19,6 @@ export interface Limits {
   maxFileBytes: number;
   maxFrameHeaderBytes: number;
   maxFrameBodyBytes: number;
-  maxBufferedFrames: number;
   maxStderrBytes: number;
 }
 
@@ -43,7 +42,6 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   maxFileBytes: 2 * 1024 * 1024,
   maxFrameHeaderBytes: 16 * 1024,
   maxFrameBodyBytes: 8 * 1024 * 1024,
-  maxBufferedFrames: 8,
   maxStderrBytes: 64 * 1024,
 });
 
@@ -67,7 +65,6 @@ export const HARD_LIMITS: Readonly<Limits> = Object.freeze({
   maxFileBytes: 20 * 1024 * 1024,
   maxFrameHeaderBytes: 64 * 1024,
   maxFrameBodyBytes: 64 * 1024 * 1024,
-  maxBufferedFrames: 32,
   maxStderrBytes: 1024 * 1024,
 });
 

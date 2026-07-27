@@ -1,7 +1,13 @@
 import type { Readable } from "node:stream";
 import { AbstractMessageReader, Disposable, type DataCallback, type Message } from "vscode-jsonrpc/node";
 
-export interface ReaderLimits { maxHeaderBytes: number; maxBodyBytes: number; maxBufferedFrames: number }
+/**
+ * Bounds on what may be retained while a frame is still incomplete. There is no separate cap on the
+ * number of buffered frames: the parser drains every complete frame from the buffer as soon as it
+ * arrives, so at most one incomplete frame is ever held, and these byte limits are what bound it.
+ * A count of frames per chunk would only measure throughput, which is not a memory risk.
+ */
+export interface ReaderLimits { maxHeaderBytes: number; maxBodyBytes: number }
 
 export class BoundedStreamMessageReader extends AbstractMessageReader {
   private buffer = Buffer.alloc(0);

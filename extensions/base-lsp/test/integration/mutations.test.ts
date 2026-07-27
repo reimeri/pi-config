@@ -60,6 +60,34 @@ describe("code actions", () => {
     } finally { await manager.shutdown(); }
   });
 
+  it("isolates a candidate whose resolve returns nothing instead of failing the whole call", async () => {
+    const { a, manager, codeActions } = await setup({ FAKE_LSP_ACTION_MODE: "mixed-null-resolve" });
+    try {
+      const result = await execute(codeActions, { path: a, line: 1, symbol: "ERROR" });
+      expect(result.details.status).toBe("partial");
+      expect(result.details.actions).toHaveLength(2);
+      expect(result.details.actions[0]).toMatchObject({ title: "Fix ERROR", supported: true });
+      expect(result.details.actions[1]).toMatchObject({ title: "Unresolvable fix", supported: false });
+      expect(result.details.actions[1].normalizationError).toMatch(/no usable action/);
+    } finally { await manager.shutdown(); }
+  });
+
+  it("keeps a preview token usable after a failed apply and consumes it after a successful one", async () => {
+    const { a, manager, runtime, codeActions } = await setup();
+    try {
+      const preview = await execute(codeActions, { path: a, line: 1, symbol: "ERROR", title: "Fix ERROR" });
+      const actionId = preview.details.actionId;
+      expect(runtime.previewActions.has(actionId)).toBe(true);
+      // A request that fails before anything is applied — here an unresolvable symbol — must leave
+      // the token alone: the action was never applied, so forcing a fresh preview would be wrong.
+      await expect(execute(codeActions, { path: a, line: 1, symbol: "nowhere", title: "Fix ERROR", apply: true, actionId })).rejects.toThrow();
+      expect(runtime.previewActions.has(actionId)).toBe(true);
+      const applied = await execute(codeActions, { path: a, line: 1, symbol: "ERROR", title: "Fix ERROR", apply: true, actionId });
+      expect(applied.details.applied).toBe(true);
+      expect(runtime.previewActions.has(actionId)).toBe(false);
+    } finally { await manager.shutdown(); }
+  });
+
   it("applies TypeScript edit actions whose wrapper command is provably redundant", async () => {
     const { a, manager, codeActions } = await setup({ FAKE_LSP_ACTION_MODE: "typescript-redundant", FAKE_LSP_SERVER_NAME: "typescript-language-server" }, "typescript");
     try {
@@ -106,6 +134,25 @@ describe("rename", () => {
       const applied = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta", apply: true, renameId: preview.details.renameId });
       expect(applied.details.applied).toBe(true);
       expect(await readFile(a, "utf8")).toContain("beta"); expect(await readFile(b, "utf8")).toContain("beta");
+    } finally { await manager.shutdown(); }
+  });
+
+  it("consumes a rename token once the rename is on disk", async () => {
+    const { root, a, b, server, manager, runtime, rename } = await setup();
+    try {
+      const route: Route = { server, root, resolution: { root, distance: 0, markerPriority: 0 }, specificity: 1 };
+      const client = await manager.acquire(route); await client.documents!.sync(a); await client.documents!.sync(b);
+      const preview = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta" });
+      const renameId = preview.details.renameId;
+      expect(runtime.previewRenames.has(renameId)).toBe(true);
+      await expect(execute(rename, { path: a, line: 1, symbol: "nowhere", newName: "beta", apply: true, renameId })).rejects.toThrow();
+      expect(runtime.previewRenames.has(renameId)).toBe(true);
+      const applied = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta", apply: true, renameId });
+      expect(applied.details.applied).toBe(true);
+      // Applied once, the token is spent: replaying it must require a fresh preview against the
+      // file as it now stands.
+      expect(runtime.previewRenames.has(renameId)).toBe(false);
+      await expect(execute(rename, { path: a, line: 1, symbol: "beta", newName: "gamma", apply: true, renameId })).rejects.toThrow(/not previewed/);
     } finally { await manager.shutdown(); }
   });
 
