@@ -2,6 +2,8 @@ export interface Limits {
   requestTimeoutMs: number;
   initializeTimeoutMs: number;
   shutdownTimeoutMs: number;
+  /** Quiet period between the repeated mutation requests used to confirm a stable server answer. */
+  mutationSettleMs: number;
   idleClientMs: number;
   maxClients: number;
   maxOpenDocuments: number;
@@ -25,6 +27,7 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   requestTimeoutMs: 20_000,
   initializeTimeoutMs: 30_000,
   shutdownTimeoutMs: 2_000,
+  mutationSettleMs: 400,
   idleClientMs: 300_000,
   maxClients: 6,
   maxOpenDocuments: 100,
@@ -48,6 +51,7 @@ export const HARD_LIMITS: Readonly<Limits> = Object.freeze({
   requestTimeoutMs: 120_000,
   initializeTimeoutMs: 120_000,
   shutdownTimeoutMs: 10_000,
+  mutationSettleMs: 10_000,
   idleClientMs: 3_600_000,
   maxClients: 32,
   maxOpenDocuments: 1_000,

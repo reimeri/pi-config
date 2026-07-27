@@ -26,6 +26,13 @@ export class DocumentStore {
   private readonly registryMutex = new AsyncMutex();
   private readonly pins = new Map<string, number>();
   private readonly pinWaiters = new Set<() => void>();
+  /**
+   * Highest version ever assigned per path, retained across close/reopen. Versions must never be
+   * reused for a document whose content differs, because consumers such as the diagnostic service
+   * treat a matching (uri, version) pair as proof that a server publication describes this exact
+   * snapshot. Restarting at version 1 after an LRU close would break that invariant.
+   */
+  private readonly versionFloor = new Map<string, number>();
   constructor(private readonly server: ServerDefinition, private readonly capabilities: NormalizedCapabilities, private readonly notify: Notify, private readonly maxOpen: number, private readonly maxFileBytes: number) {}
 
   list(): OpenDocument[] { return [...this.documents.values()].map((document) => ({ ...document })); }
@@ -96,11 +103,13 @@ export class DocumentStore {
     const uri = filePathToUri(path);
     const languageId = languageIdFor(this.server, path) ?? "plaintext";
     if (!existing) {
-      const document: OpenDocument = { uri, canonicalPath: path, languageId, version: 1, contentHash: hash, text, mtimeMs: info.mtimeMs, lastUse: Date.now() };
+      const openVersion = (this.versionFloor.get(path) ?? 0) + 1;
+      const document: OpenDocument = { uri, canonicalPath: path, languageId, version: openVersion, contentHash: hash, text, mtimeMs: info.mtimeMs, lastUse: Date.now() };
       await this.registryMutex.run(async () => {
         await this.evictIfNeeded(signal);
         this.documents.set(path, document);
-        try { if (this.capabilities.openClose) await this.notify("textDocument/didOpen", { textDocument: { uri, languageId, version: 1, text } }); }
+        this.versionFloor.set(path, openVersion);
+        try { if (this.capabilities.openClose) await this.notify("textDocument/didOpen", { textDocument: { uri, languageId, version: openVersion, text } }); }
         catch (error) { this.documents.delete(path); throw error; }
       });
       return { ...document, syncState: "opened" };
@@ -110,6 +119,7 @@ export class DocumentStore {
       ? [{ range: offsetsToServerRange(existing.text, 0, existing.text.length, this.capabilities.positionEncoding), text }]
       : [{ text }];
     await this.notify("textDocument/didChange", { textDocument: { uri, version }, contentChanges });
+    this.versionFloor.set(path, version);
     Object.assign(existing, { version, contentHash: hash, text, mtimeMs: info.mtimeMs, lastUse: Date.now() });
     return { ...existing, syncState: "changed" };
   }

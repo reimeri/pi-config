@@ -7,6 +7,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 let buffer = Buffer.alloc(0);
 const documents = new Map();
 const cancelled = new Set();
+let renameCalls = 0;
 let descendant;
 if (process.env.FAKE_LSP_DESCENDANT === "1") {
   descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
@@ -111,7 +112,13 @@ async function resultFor(method, params) {
     case "textDocument/prepareRename": return range(params.position.line, params.position.character, params.position.line, params.position.character + wordAt(params.textDocument.uri, params.position).length);
     case "textDocument/rename": {
       const oldName = wordAt(params.textDocument.uri, params.position);
-      return renameEdit(oldName, params.newName);
+      // Simulate a server answering from a partially loaded project: the first N responses (or
+      // every other response under FLAP) cover only the requested file instead of the whole project.
+      renameCalls += 1;
+      const warmup = Number(process.env.FAKE_LSP_RENAME_WARMUP ?? 0);
+      const flap = process.env.FAKE_LSP_RENAME_FLAP === "1" && renameCalls % 2 === 1;
+      const narrow = renameCalls <= warmup || flap;
+      return renameEdit(oldName, params.newName, narrow ? params.textDocument.uri : undefined);
     }
     default: throw new Error(`Unsupported method ${method}`);
   }
@@ -166,8 +173,8 @@ function replacementCommandChanges(uri, oldText, newText) {
   const end = { line: start.line, offset: start.offset + oldText.length };
   return [{ fileName: fileURLToPath(uri), textChanges: [{ start, end, newText }] }];
 }
-function renameEdit(oldName, newName) {
-  return { documentChanges: [...documents].map(([uri, document]) => ({ textDocument: { uri, version: document.version }, edits: occurrences(document.text, oldName).map((offset) => ({ range: offsetRange(document.text, offset, oldName.length), newText: newName })) })).filter((change) => change.edits.length) };
+function renameEdit(oldName, newName, onlyUri) {
+  return { documentChanges: [...documents].filter(([uri]) => !onlyUri || uri === onlyUri).map(([uri, document]) => ({ textDocument: { uri, version: document.version }, edits: occurrences(document.text, oldName).map((offset) => ({ range: offsetRange(document.text, offset, oldName.length), newText: newName })) })).filter((change) => change.edits.length) };
 }
 function wordAt(uri, position) {
   const text = documents.get(uri)?.text ?? "";

@@ -109,6 +109,37 @@ describe("rename", () => {
     } finally { await manager.shutdown(); }
   });
 
+  it("converges on the complete edit when a warming server first answers with only the source file", async () => {
+    const { root, a, b, server, manager, rename } = await setup({ FAKE_LSP_RENAME_WARMUP: "1" });
+    try {
+      const route: Route = { server, root, resolution: { root, distance: 0, markerPriority: 0 }, specificity: 1 };
+      const client = await manager.acquire(route); await client.documents!.sync(a); await client.documents!.sync(b);
+      const preview = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta" });
+      // The first response covered a.ts alone; stability confirmation must discard it rather than
+      // publish a half-finished rename, and settle on the complete two-file edit.
+      expect(preview.details).toMatchObject({ stable: true, applicable: true, attempts: 3 });
+      expect(preview.details.files).toHaveLength(2);
+      const applied = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta", apply: true, renameId: preview.details.renameId });
+      expect(applied.details.applied).toBe(true);
+      expect(await readFile(a, "utf8")).toContain("beta");
+      expect(await readFile(b, "utf8")).toContain("beta");
+    } finally { await manager.shutdown(); }
+  });
+
+  it("refuses to bless a rename while the server keeps changing its answer", async () => {
+    const { root, a, server, manager, runtime, rename } = await setup({ FAKE_LSP_RENAME_FLAP: "1" });
+    try {
+      const route: Route = { server, root, resolution: { root, distance: 0, markerPriority: 0 }, specificity: 1 };
+      const client = await manager.acquire(route); await client.documents!.sync(a); await client.documents!.sync(join(root, "b.ts"));
+      const preview = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta" });
+      expect(preview.details).toMatchObject({ stable: false, applicable: false, status: "partial" });
+      expect(preview.details.reasons.join(" ")).toMatch(/still changing/);
+      expect(runtime.previewRenames.has(preview.details.renameId)).toBe(false);
+      await expect(execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta", apply: true, renameId: preview.details.renameId })).rejects.toThrow(/not previewed/);
+      expect(await readFile(a, "utf8")).toContain("alpha");
+    } finally { await manager.shutdown(); }
+  });
+
   it("rejects a stale preview identity after the server edit changes", async () => {
     const { a, b, manager, rename } = await setup();
     try {

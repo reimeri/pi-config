@@ -155,6 +155,46 @@ describe("truthful diagnostics", () => {
     } finally { await client.shutdown(); }
   });
 
+  it("accepts a versioned publication that predates the checkpoint instead of stalling", async () => {
+    const { root, path } = await fixture("const ERROR = 1;\n");
+    const client = await fakeClient(root, { FAKE_LSP_PUSH: "1" });
+    const service = new DiagnosticService();
+    try {
+      await client.start();
+      client.capabilities!.diagnostics = { pull: false, workspace: false };
+      service.observe(client);
+      // An earlier request (navigation, code actions, ...) opens the document and the server
+      // publishes for it. The next diagnostics call takes its checkpoint after that publication.
+      await client.documents!.sync(path);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const checkpoint = service.checkpoint(client);
+      const snapshot = await client.documents!.sync(path);
+      expect(snapshot.syncState).toBe("unchanged");
+      const started = Date.now();
+      const result = await service.check(client, snapshot, 2_000, false, undefined, checkpoint);
+      expect(result.state).toBe("diagnostics");
+      expect(result.confirmation).toBe("versioned");
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally { await client.shutdown(); }
+  });
+
+  it("still requires an unversioned publication to postdate the checkpoint", async () => {
+    const { root, path } = await fixture("const ERROR = 1;\n");
+    const client = await fakeClient(root, { FAKE_LSP_PUSH: "1", FAKE_LSP_UNVERSIONED: "1" });
+    const service = new DiagnosticService();
+    try {
+      await client.start();
+      client.capabilities!.diagnostics = { pull: false, workspace: false };
+      service.observe(client);
+      await client.documents!.sync(path);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const checkpoint = service.checkpoint(client);
+      const snapshot = await client.documents!.sync(path);
+      const result = await service.check(client, snapshot, 50, true, undefined, checkpoint);
+      expect(result.state).toBe("unconfirmed");
+    } finally { await client.shutdown(); }
+  });
+
   it("returns unversioned non-empty push findings as possibly stale", async () => {
     const { root, path } = await fixture("const ERROR = 1;\n");
     const client = await fakeClient(root, { FAKE_LSP_PUSH: "1", FAKE_LSP_UNVERSIONED: "1" });

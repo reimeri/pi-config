@@ -61,6 +61,23 @@ describe("document synchronization ordering", () => {
     expect(methods).toEqual(["textDocument/didOpen", "request", "textDocument/didChange"]);
   });
 
+  it("never reuses a document version after a close and reopen", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-versions-")); const path = join(root, "a.ts"); await writeFile(path, "const v = 1;\n");
+    const opened: number[] = [];
+    const store = new DocumentStore(fakeServer(), capabilities, async (method, value) => { if (method === "textDocument/didOpen") opened.push((value as any).textDocument.version); }, 10, 1024 * 1024);
+    await store.sync(path);
+    await writeFile(path, "const v = 2;\n"); await store.sync(path);
+    expect(store.get(path)?.version).toBe(2);
+    await store.close(path);
+    // Reopening with different content must not reuse version 1: consumers treat a matching
+    // (uri, version) pair as proof that a server publication describes this exact content.
+    await writeFile(path, "const v = 3;\n");
+    const reopened = await store.sync(path);
+    expect(reopened.syncState).toBe("opened");
+    expect(reopened.version).toBe(3);
+    expect(opened).toEqual([1, 3]);
+  });
+
   it("serializes didChange, didSave, and a later didChange on the same URI", async () => {
     const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-store-")); const path = join(root, "a.ts"); await writeFile(path, "const v = 1;\n");
     const methods: string[] = []; const params: unknown[] = [];

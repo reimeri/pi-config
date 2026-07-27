@@ -163,7 +163,17 @@ export class DiagnosticService {
   }
 
   private waitForPush(state: ClientDiagnosticState, snapshot: DocumentSnapshot, waitMs: number, signal: AbortSignal | undefined, settleMs: number, pushFirstMs: number, acceptUnversionedEmptyAfterOpen: boolean, checkpoint?: PushCheckpoint): Promise<DiagnosticEvidence> {
-    const relevant = (params: BoundedPublishDiagnostics): boolean => checkpoint === undefined || params.sequence > checkpoint;
+    /**
+     * The checkpoint exists so that an unversioned publication cannot be mistaken for a causal
+     * response to the change we just synchronized. A publication carrying a version is not
+     * ambiguous in that way: document versions are unique per client and never reused for
+     * differing content, so a version equal to the snapshot's is itself proof that the server
+     * observed exactly this content. Requiring such a publication to also postdate the checkpoint
+     * would discard valid affirmative evidence and stall for the whole wait budget whenever the
+     * document was already opened and published by an earlier request.
+     */
+    const versionConfirms = (params: BoundedPublishDiagnostics): boolean => params.version !== undefined && params.version === snapshot.version;
+    const relevant = (params: BoundedPublishDiagnostics): boolean => checkpoint === undefined || params.sequence > checkpoint || versionConfirms(params);
     const provisionalEmpty = (params: BoundedPublishDiagnostics): boolean => params.version === undefined && params.diagnostics.length === 0;
     const current = state.pushes.get(snapshot.uri);
     const converted = current && relevant(current) ? evidenceFromPush(current, snapshot, this.maxDiagnostics) : undefined;

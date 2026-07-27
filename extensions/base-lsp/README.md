@@ -193,6 +193,8 @@ Preview a semantic rename:
 
 The preview returns a `renameId` and bounded unified diff. Apply requires the same arguments plus that identity and `"apply": true`. The extension reruns prepare/rename against fresh synchronized content and requires an exact identity match before publication.
 
+Because a server that is still loading a project answers from a partial index and can return an edit covering only the requested file, every rename request is repeated until two consecutive responses are identical, separated by `limits.mutationSettleMs`. Results report `stable` and `attempts`. An answer that never settles is returned as `status: "partial"` with `applicable: false` and no usable `renameId`, rather than a confident partial refactor; preview again once indexing has finished.
+
 ## Mutation safety
 
 Code actions and rename share one workspace-edit engine:
@@ -238,6 +240,7 @@ Configuration is JSON only. Objects deep-merge, arrays replace, and `null` clear
   "disabledServers": ["ruff"],
   "limits": {
     "requestTimeoutMs": 20000,
+    "mutationSettleMs": 400,
     "maxClients": 6,
     "maxFiles": 100
   },
@@ -286,7 +289,7 @@ No server, watcher, or process starts in the extension factory or `session_start
 - **Wrong server/root:** pass explicit `server`/`root`, inspect project markers, then `/lsp restart <id>` after marker changes.
 - **TypeScript cannot find TypeScript:** install both `typescript-language-server` and `typescript`, or configure `initializationOptions.tsserver.path`.
 - **Timeout or incomplete navigation:** let initial indexing finish, increase the bounded request timeout in user config, or inspect `/lsp status` progress/stderr.
-- **Unconfirmed diagnostics:** the server did not provide affirmative evidence. Retry with `refresh: true`; do not interpret it as clean. TypeScript initial clean files use a bounded post-open server policy, while later unversioned empty publications remain provisional.
+- **Unconfirmed diagnostics:** the server did not provide affirmative evidence. Retry with `refresh: true`; do not interpret it as clean. TypeScript initial clean files use a bounded post-open server policy, while later unversioned empty publications remain provisional. A push server's publication is accepted whenever it carries a version matching the synchronized document, even if it arrived before the request; only unversioned publications must postdate the request to count as evidence.
 - **Unsupported TypeScript declaration:** `typescript-language-server` does not advertise the LSP declaration method. Use an explicit definition request only when definition semantics are acceptable.
 - **Unavailable workspace servers:** implicit workspace scans summarize missing server/root groups while retaining per-file `unavailable` evidence and installation hints in structured details.
 - **Stale diagnostics after external edits:** explicit requests reread authoritative disk content. Use `refresh: true` or restart a misbehaving server.
