@@ -169,10 +169,11 @@ export default function customFooterExtension(pi: ExtensionAPI) {
 				let rightSideWithoutProvider = modelName;
 				if (ctx.model?.reasoning) {
 					const thinkingLevel = ctx.thinkingLevel ?? "off";
+					const thinkingColor = theme.getThinkingBorderColor(thinkingLevel);
 					rightSideWithoutProvider =
 						thinkingLevel === "off"
-							? `${modelName} • thinking off`
-							: `${modelName} • ${thinkingLevel}`;
+							? `${modelName} • thinking ${thinkingColor("off")}`
+							: `${modelName} • ${thinkingColor(thinkingLevel)}`;
 				}
 
 				const minPadding = 2;

@@ -97,6 +97,7 @@ class CurrentTaskEditor extends CustomEditor {
 		keybindings: KeybindingsManager,
 		private readonly getTask: () => string | undefined,
 		private readonly getModes: () => EditorTopBarMode[],
+		private readonly neutral: (text: string) => string,
 		private readonly warning: (text: string) => string,
 		private readonly error: (text: string) => string,
 	) {
@@ -106,15 +107,15 @@ class CurrentTaskEditor extends CustomEditor {
 	render(width: number): string[] {
 		const task = normalizeTask(this.getTask() ?? "");
 		const modes = this.getModes();
-		const defaultBorderColor = this.borderColor;
-		const activeBorderColor = modeBorderColor(modes, this.warning, this.error) ?? defaultBorderColor;
+		const previousBorderColor = this.borderColor;
+		const activeBorderColor = modeBorderColor(modes, this.warning, this.error) ?? this.neutral;
 
 		this.borderColor = activeBorderColor;
 		let lines: string[];
 		try {
 			lines = super.render(width);
 		} finally {
-			this.borderColor = defaultBorderColor;
+			this.borderColor = previousBorderColor;
 		}
 
 		if ((!task && modes.length === 0) || lines.length === 0) return lines;
@@ -238,6 +239,7 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 				keybindings,
 				() => pi.getSessionName(),
 				getActiveModes,
+				(text) => ctx.ui.theme.fg("thinkingOff", text),
 				(text) => ctx.ui.theme.fg("warning", text),
 				(text) => ctx.ui.theme.fg("error", text),
 			);
