@@ -1,0 +1,216 @@
+import { stat } from "node:fs/promises";
+import { relative } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { diagnosticsSchema, type DiagnosticsInput } from "./schemas.js";
+import type { RuntimeGetter, SessionRuntime } from "./context.js";
+import { discoverFiles, type DiscoveryResult } from "../workspace/files.js";
+import { resolveExplicitRoot, resolveInputPath } from "../workspace/boundary.js";
+import { routeFile, type Route } from "../servers/routing.js";
+import { baseDetails, envelope, rethrowUnexpected, statusFromError, type ToolStatus } from "./results.js";
+import { serverToPublicPosition } from "../protocol/positions.js";
+import type { Diagnostic } from "../protocol/types.js";
+import type { DocumentSnapshot } from "../runtime/document-store.js";
+import type { DiagnosticEvidence } from "../protocol/diagnostics.js";
+import type { LspClient } from "../protocol/client.js";
+import { sanitizeText } from "../util/text.js";
+
+interface Inventory extends DiscoveryResult { omittedUnknown?: boolean }
+interface WorkItem { file: string; route: Route }
+interface WorkGroup { route: Route; items: WorkItem[] }
+
+export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGetter): void {
+  pi.registerTool({
+    name: "lsp_diagnostics",
+    label: "LSP Diagnostics",
+    description: "Get truthful, bounded LSP diagnostics for files or a workspace. Silence and timeout are not reported as clean.",
+    promptSnippet: "Get semantic compiler/type diagnostics from configured language servers",
+    promptGuidelines: ["Use lsp_diagnostics after meaningful code changes when a language server is available."],
+    parameters: diagnosticsSchema,
+    async execute(_id, params: DiagnosticsInput, signal) {
+      const started = Date.now();
+      const runtime = getRuntime();
+      if (!runtime.loaded.authorized) return envelope("LSP startup refused because the project is untrusted. Trust the project and restart.", { ...baseDetails("diagnostics", "untrusted", started) });
+      const maxFiles = Math.min(params.maxFiles ?? runtime.loaded.config.limits.maxFiles, runtime.loaded.config.limits.maxFiles);
+      const maxDiagnostics = Math.min(params.maxDiagnostics ?? runtime.loaded.config.limits.maxDiagnostics, runtime.loaded.config.limits.maxDiagnostics);
+      const waitMs = Math.min(params.waitMs ?? runtime.loaded.config.limits.requestTimeoutMs, runtime.loaded.config.limits.requestTimeoutMs);
+      const mode = params.mode ?? (params.paths ? "paths" : "workspace");
+      try {
+        const inventory = await inventoryFiles(runtime, params, maxFiles, signal);
+        if (!inventory.files.length) return envelope("No matching files found.", { ...baseDetails("diagnostics", inventory.capped ? "partial" : "no_results", started), files: [], discovery: inventory });
+        const work = await buildWork(runtime, inventory.files, params.server);
+        if (!work.length) return envelope("No configured language server matches the selected files.", { ...baseDetails("diagnostics", "no_results", started), files: [], discovery: inventory });
+        const groups = groupWork(work);
+        const rawEvidence: Array<{ item: WorkItem; client?: LspClient; snapshot?: DocumentSnapshot; result: DiagnosticEvidence }> = [];
+        const serverRuns: Array<{ server: string; root?: string; status: string; durationMs: number }> = [];
+        let omittedWorkspaceReports = 0;
+        for (const group of groups) {
+          const groupStarted = Date.now();
+          let client: LspClient | undefined;
+          try {
+            const acquired = await runtime.manager.acquire(group.route, signal);
+            client = acquired;
+            runtime.diagnostics.observe(acquired);
+            if (mode === "workspace" && acquired.capabilities?.diagnostics.workspace) {
+              await acquired.documents!.withSynchronizedDocuments(group.items.map((item) => item.file), signal, async (snapshots) => {
+                const results = await runtime.diagnostics.checkWorkspace(acquired, snapshots, waitMs, params.refresh ?? false, signal);
+                omittedWorkspaceReports += results.omittedReports;
+                const byPath = new Map(snapshots.map((snapshot) => [snapshot.canonicalPath, snapshot] as const));
+                for (const item of group.items) {
+                  const snapshot = byPath.get(item.file)!;
+                  rawEvidence.push({ item, client: acquired, snapshot, result: results.evidence.get(snapshot.uri) ?? { state: "unconfirmed", diagnostics: [], message: "No workspace diagnostic evidence" } });
+                }
+              });
+            } else {
+              for (const item of group.items) {
+                await acquired.documents!.withSynchronizedDocument(item.file, signal, async (snapshot) => {
+                  rawEvidence.push({ item, client: acquired, snapshot, result: await runtime.diagnostics.check(acquired, snapshot, waitMs, params.refresh ?? false, signal) });
+                });
+              }
+            }
+            serverRuns.push({ server: group.route.server.id, root: group.route.root, status: "ok", durationMs: Date.now() - groupStarted });
+          } catch (error) {
+            const state = evidenceStateFromError(error);
+            for (const item of group.items) rawEvidence.push({ item, result: { state, diagnostics: [], message: error instanceof Error ? error.message : String(error) } });
+            serverRuns.push({ server: group.route.server.id, root: group.route.root, status: state, durationMs: Date.now() - groupStarted });
+          } finally { if (client) runtime.manager.release(client); }
+        }
+        const evidence: Array<Record<string, unknown>> = [];
+        let emittedDiagnostics = 0;
+        let omittedDiagnostics = 0;
+        for (const entry of rawEvidence) {
+          omittedDiagnostics += entry.result.omittedDiagnostics ?? 0;
+          const filtered = entry.result.diagnostics.filter((diagnostic) => severityMatches(diagnostic, params.severity ?? "all"));
+          const remaining = Math.max(0, maxDiagnostics - emittedDiagnostics);
+          const displayed = filtered.slice(0, remaining);
+          emittedDiagnostics += displayed.length;
+          omittedDiagnostics += Math.max(0, filtered.length - displayed.length);
+          let normalized: Array<Record<string, unknown>> = [];
+          let normalizationError: string | undefined;
+          if (entry.snapshot && entry.client) {
+            try { normalized = displayed.map((diagnostic) => normalizeDiagnostic(diagnostic, entry.snapshot!.text, entry.client!.capabilities!.positionEncoding)); }
+            catch (error) { normalizationError = error instanceof Error ? error.message : String(error); }
+          }
+          evidence.push({
+            path: relative(entry.item.route.root, entry.item.file) || ".",
+            server: entry.item.route.server.id,
+            root: entry.item.route.root,
+            state: normalizationError ? "error" : entry.result.state,
+            underlyingDiagnosticCount: entry.result.diagnostics.length + (entry.result.omittedDiagnostics ?? 0),
+            filteredDiagnosticCount: filtered.length,
+            possiblyStale: entry.result.possiblyStale ?? false,
+            diagnostics: normalized,
+            ...(normalizationError ? { message: `Malformed diagnostic range: ${normalizationError}` } : entry.result.message ? { message: entry.result.message } : {}),
+            ...(entry.snapshot ? { contentHash: entry.snapshot.contentHash, version: entry.snapshot.version } : {}),
+          });
+        }
+        const states = evidence.map((entry) => String(entry.state));
+        const affirmative = states.filter((state) => state === "clean" || state === "diagnostics").length;
+        let status = aggregateStatus(states, affirmative);
+        if ((inventory.capped || omittedDiagnostics > 0 || omittedWorkspaceReports > 0) && status === "ok") status = "partial";
+        const warnings: string[] = [];
+        if (inventory.capped) warnings.push(inventory.omittedUnknown ? `Discovery was capped; at least ${inventory.omitted} matching file(s) were omitted and additional files may be undiscovered.` : `Discovery was capped; ${inventory.omitted} matching file(s) were omitted.`);
+        if (omittedDiagnostics) warnings.push(`${omittedDiagnostics} diagnostic(s) were omitted by the output limit.`);
+        if (omittedWorkspaceReports) warnings.push(`${omittedWorkspaceReports} additional workspace diagnostic report(s) were omitted.`);
+        const lines = evidence.flatMap((entry) => {
+          const diagnostics = entry.diagnostics as Array<Record<string, unknown>>;
+          if (diagnostics.length) return diagnostics.map((diagnostic) => `${entry.server} ${entry.path}:${(diagnostic.range as any).start.line}:${(diagnostic.range as any).start.character} ${diagnostic.severity} ${diagnostic.message}`);
+          const filtered = Number(entry.filteredDiagnosticCount ?? 0);
+          const suffix = entry.state === "diagnostics" && filtered === 0 ? " (findings exist but none match the severity filter)" : entry.message ? ` (${entry.message})` : "";
+          return [`${entry.server} ${entry.path}: ${entry.state}${suffix}`];
+        });
+        return envelope(lines.join("\n"), { ...baseDetails("diagnostics", status, started), servers: serverRuns, files: evidence, discovery: inventory, omittedDiagnostics, omittedWorkspaceReports, truncated: omittedDiagnostics > 0 || omittedWorkspaceReports > 0 || inventory.capped, warnings });
+      } catch (error) {
+        rethrowUnexpected(error);
+        const status = statusFromError(error);
+        return envelope(error instanceof Error ? error.message : String(error), { ...baseDetails("diagnostics", status, started) });
+      }
+    },
+  });
+}
+
+async function inventoryFiles(runtime: SessionRuntime, params: DiagnosticsInput, maxFiles: number, signal?: AbortSignal): Promise<Inventory> {
+  const mode = params.mode ?? (params.paths ? "paths" : "workspace");
+  if (mode === "changed") {
+    const all = [...runtime.changed].sort();
+    return { files: all.slice(0, maxFiles), entries: all.length, ignored: 0, oversized: 0, omitted: Math.max(0, all.length - maxFiles), capped: all.length > maxFiles };
+  }
+  const inputs = params.paths ?? [params.root ?? runtime.boundary];
+  const result: Inventory = { files: [], entries: 0, ignored: 0, oversized: 0, omitted: 0, capped: false };
+  const maxEntries = runtime.loaded.config.limits.maxDiscoveryEntries;
+  for (let inputIndex = 0; inputIndex < inputs.length; inputIndex += 1) {
+    if (result.entries >= maxEntries || result.files.length >= maxFiles) { result.capped = true; result.omittedUnknown = true; break; }
+    const input = inputs[inputIndex]!;
+    const canonical = params.root && !params.paths && input === params.root
+      ? await resolveExplicitRoot(input, runtime.cwd, runtime.boundary)
+      : await resolveInputPath(input, runtime.cwd, runtime.boundary, false);
+    const info = await stat(canonical);
+    if (info.isFile()) {
+      result.entries += 1;
+      if (result.files.length < maxFiles) result.files.push(canonical); else { result.omitted += 1; result.capped = true; }
+    } else if (info.isDirectory()) {
+      const remainingEntries = Math.max(0, maxEntries - result.entries);
+      const remainingFiles = Math.max(0, maxFiles - result.files.length);
+      const found = await discoverFiles(canonical, runtime.boundary, runtime.registry.enabled(), runtime.loaded.config.ignore, remainingEntries, remainingFiles, runtime.loaded.config.limits.maxFileBytes, signal);
+      result.files.push(...found.files); result.entries += found.entries; result.ignored += found.ignored; result.oversized += found.oversized; result.omitted += found.omitted; result.capped ||= found.capped;
+      if (found.capped && found.entries >= remainingEntries) result.omittedUnknown = true;
+    }
+    if ((result.files.length >= maxFiles || result.entries >= maxEntries) && inputIndex < inputs.length - 1) { result.capped = true; result.omittedUnknown = true; break; }
+  }
+  result.files = [...new Set(result.files)].sort().slice(0, maxFiles);
+  return result;
+}
+
+async function buildWork(runtime: SessionRuntime, files: string[], selection?: string | string[]): Promise<WorkItem[]> {
+  const explicit = selection ? (Array.isArray(selection) ? selection : [selection]) : undefined;
+  const work: WorkItem[] = [];
+  for (const file of files) {
+    if (explicit) {
+      for (const id of explicit) {
+        const routed = await routeFile(file, runtime.boundary, runtime.registry.enabled(), runtime.roots, id);
+        const route = routed.primary ?? routed.diagnostics.find((item) => item.server.id === id);
+        if (route) work.push({ file, route });
+      }
+    } else {
+      const routed = await routeFile(file, runtime.boundary, runtime.registry.enabled(), runtime.roots);
+      if (routed.primary) work.push({ file, route: routed.primary });
+      for (const route of routed.diagnostics) work.push({ file, route });
+    }
+  }
+  return work;
+}
+
+function groupWork(work: WorkItem[]): WorkGroup[] {
+  const groups = new Map<string, WorkGroup>();
+  for (const item of work) {
+    const key = `${item.route.server.id}\0${item.route.root}`;
+    const group = groups.get(key) ?? { route: item.route, items: [] };
+    if (!group.items.some((existing) => existing.file === item.file)) group.items.push(item);
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((a, b) => a.route.server.id.localeCompare(b.route.server.id) || a.route.root.localeCompare(b.route.root));
+}
+
+function aggregateStatus(states: string[], affirmative: number): ToolStatus {
+  if (states.length && affirmative === states.length) return "ok";
+  if (affirmative) return "partial";
+  if (states.every((state) => state === "timed_out")) return "timed_out";
+  if (states.every((state) => state === "cancelled")) return "cancelled";
+  if (states.every((state) => state === "unavailable")) return "unavailable";
+  if (states.every((state) => state === "error")) return "error";
+  return "no_results";
+}
+function evidenceStateFromError(error: unknown): DiagnosticEvidence["state"] { const status = statusFromError(error); return status === "timed_out" || status === "cancelled" || status === "unavailable" ? status : "error"; }
+function severityMatches(diagnostic: Diagnostic, severity: string): boolean { const wanted: Record<string, number> = { error: 1, warning: 2, information: 3, hint: 4 }; return severity === "all" || diagnostic.severity === wanted[severity]; }
+function normalizeDiagnostic(diagnostic: Diagnostic, text: string, encoding: "utf-8" | "utf-16" | "utf-32"): Record<string, unknown> {
+  return {
+    message: sanitizeText(diagnostic.message, 4_000),
+    severity: ["unknown", "error", "warning", "information", "hint"][diagnostic.severity ?? 0] ?? "unknown",
+    range: { start: serverToPublicPosition(text, diagnostic.range.start, encoding), end: serverToPublicPosition(text, diagnostic.range.end, encoding) },
+    ...(diagnostic.source ? { source: sanitizeText(diagnostic.source, 500) } : {}),
+    ...(diagnostic.code !== undefined ? { code: sanitizeText(typeof diagnostic.code === "object" ? diagnostic.code.value : diagnostic.code, 500) } : {}),
+    ...(diagnostic.codeDescription?.href ? { codeDescription: sanitizeText(diagnostic.codeDescription.href, 2_000) } : {}),
+    ...(diagnostic.tags ? { tags: diagnostic.tags.slice(0, 10) } : {}),
+    ...(diagnostic.relatedInformation ? { relatedInformation: diagnostic.relatedInformation.slice(0, 10).map((item) => ({ uri: sanitizeText(item.location.uri, 2_000), rawRange: item.location.range, message: sanitizeText(item.message, 2_000), positionEncoding: encoding })) } : {}),
+    ...(diagnostic.data !== undefined ? { hasData: true } : {}),
+  };
+}

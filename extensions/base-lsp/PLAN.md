@@ -493,7 +493,7 @@ Guidance:
 - Use `vscode-jsonrpc` for JSON-RPC request/response bookkeeping, but provide the bounded transport described in Section 17 rather than using its default unbounded stream reader. Keep process lifecycle, limits, and Pi abort semantics under extension control.
 - Use `ignore` for `.gitignore`-compatible traversal. If a smaller audited implementation is preferred, remove the dependency only after equivalent tests exist.
 - Pi-provided packages belong in `peerDependencies` and must not be bundled.
-- Initial compatibility target: Node.js `>=20` and Pi coding-agent `>=0.82.1`, the first explicitly tested baseline for the required lifecycle APIs, typed result guards, truncation helpers, `CONFIG_DIR_NAME`, and `withFileMutationQueue`. Keep Pi peer ranges as `"*"` per Pi package guidance, but document the tested minimum, run package-load tests against it, and fail with a clear startup error when a required runtime export is unavailable. Raise the minimum deliberately when APIs change.
+- Initial compatibility target: Node.js `>=24` and Pi coding-agent `>=0.82.1`, the first explicitly tested Pi baseline for the required lifecycle APIs, typed result guards, truncation helpers, `CONFIG_DIR_NAME`, and `withFileMutationQueue`. This extension is currently intended for personal use on Node 24, so older Node releases are out of scope. Keep Pi peer ranges as `"*"` per Pi package guidance, but document the tested minimum, run package-load tests against it, and fail with a clear startup error when a required runtime export is unavailable. Raise the minimum deliberately when APIs change.
 - Put test/build tooling in `devDependencies`.
 - Prefer source TypeScript loaded by Pi/Jiti for the local extension. If publishing later, add a `dist` build and installation self-test.
 - Pin a lockfile and review lifecycle scripts. Runtime dependencies should not require install scripts if avoidable.
@@ -1183,8 +1183,8 @@ Use pinned fixture projects and pinned server versions. Release-gating Linux smo
 
 ### 26.5 CI matrix
 
-- Linux on Node 20 plus the current Node LTS/current versions supported by Pi.
-- Windows on at least one supported Node version for path, recognized npm-shim, and process-tree behavior.
+- Linux on Node 24.
+- Windows on Node 24 for path, recognized npm-shim, and process-tree behavior.
 - macOS where practical.
 - Typecheck, lint, unit tests, fake-server integration, package-load smoke.
 - Release-gating pinned real-server smokes listed in Section 26.4; wider catalog and long resource-leak suites may remain nightly.
