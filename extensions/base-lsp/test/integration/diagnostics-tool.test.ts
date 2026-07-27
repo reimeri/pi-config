@@ -38,6 +38,36 @@ describe("diagnostics tool scheduling", () => {
     } finally { await manager.shutdown(); }
   });
 
+  it("keeps diagnostics whose ranges fit when a sibling range does not", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-diagnostic-stale-"));
+    await writeFile(join(root, "tsconfig.json"), "{}");
+    const path = join(root, "a.ts");
+    await writeFile(path, "const ERROR = 1;\n");
+    const server = { ...fakeServer({ FAKE_LSP_STALE_RANGE: "1" }), id: "fake" };
+    const config = { ...defaultConfig(), servers: { fake: server } };
+    const loaded = { config, generation: 1, userPath: join(root, "user.json"), warnings: [], trusted: true, authorized: true };
+    const manager = new ClientManager(loaded);
+    const runtime: SessionRuntime = { cwd: root, boundary: root, loaded, registry: new ServerRegistry(config.servers), roots: new RootDetector(1), manager, diagnostics: new DiagnosticService(), changed: new Set(), previewActions: new Set(), previewRenames: new Set() };
+    try {
+      const result = await toolFor(runtime).execute("call", { paths: [path], mode: "paths", waitMs: 1_500 }, undefined, undefined, { cwd: root });
+      const file = result.details.files[0];
+      // The good diagnostic survives: one bad range must not discard the whole file.
+      expect(file.state).toBe("diagnostics");
+      expect(file.diagnostics).toHaveLength(2);
+      expect(file.message).toBeUndefined();
+      const good = file.diagnostics.find((item: any) => !item.rangeUnresolved);
+      expect(good).toMatchObject({ message: "fake error 1", range: { start: { line: 1, character: 7 } } });
+      const stale = file.diagnostics.find((item: any) => item.rangeUnresolved);
+      expect(stale).toMatchObject({ message: "stale range error", rangeUnresolved: "out-of-range", rawRange: { start: { line: 400, character: 0 } }, range: { start: { line: 401 } } });
+      expect(stale.range.start.character).toBeUndefined();
+      expect(file.unresolvedRanges).toBe(1);
+      expect(result.details.unresolvedRanges).toBe(1);
+      expect(result.details.status).toBe("partial");
+      expect(result.details.warnings.some((warning: string) => /did not fit the synchronized document/.test(warning))).toBe(true);
+      expect(result.content[0].text).toContain("[stale range]");
+    } finally { await manager.shutdown(); }
+  });
+
   it("runs independent server groups concurrently while preserving result order", async () => {
     const root = await mkdtemp(join(tmpdir(), "base-lsp-diagnostic-groups-"));
     await writeFile(join(root, "tsconfig.json"), "{}");

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { publicToServerPosition, resolveSymbolPosition, serverToPublicPosition } from "../../src/protocol/positions.js";
+import { lineTableStats, offsetsToServerRange, publicToServerPosition, resolveSymbolPosition, serverToPublicPosition } from "../../src/protocol/positions.js";
 import { deriveBoundary, resolveInputPath } from "../../src/workspace/boundary.js";
 import { RootDetector } from "../../src/servers/roots.js";
 import { routeFile } from "../../src/servers/routing.js";
@@ -25,6 +25,36 @@ describe("positions", () => {
   it("resolves literal symbol occurrences", () => {
     expect(resolveSymbolPosition("foo foo", 1, "foo#2").character).toBe(5);
     expect(() => resolveSymbolPosition("foo foo", 1, "foo")).toThrow(/ambiguous/);
+  });
+
+  it("keeps line lookup independent of document size across mixed newline styles", () => {
+    const mixed = "alpha\r\nbeta\ngamma\r\n\ndelta";
+    expect(publicToServerPosition(mixed, 3, 1, "utf-16")).toEqual({ line: 2, character: 0 });
+    expect(publicToServerPosition(mixed, 4, 1, "utf-16")).toEqual({ line: 3, character: 0 });
+    expect(publicToServerPosition(mixed, 5, 6, "utf-16")).toEqual({ line: 4, character: 5 });
+    expect(() => publicToServerPosition(mixed, 6, 1, "utf-16")).toThrow(/exceeds document length/);
+    expect(offsetsToServerRange(mixed, 0, mixed.length, "utf-16")).toEqual({ start: { line: 0, character: 0 }, end: { line: 4, character: 5 } });
+    expect(offsetsToServerRange(mixed, 7, 11, "utf-16")).toEqual({ start: { line: 1, character: 0 }, end: { line: 1, character: 4 } });
+
+    // Converting many positions against one document must not rescan it every time. Without a
+    // memoized line table this is O(document) per call and costs seconds on a large file. Assert
+    // the memo structurally rather than on wall-clock time, which flakes on a loaded machine.
+    const large = "const someIdentifier = someValue + otherValue; // filler\n".repeat(30_000);
+    const before = lineTableStats().builds;
+    for (let index = 0; index < 400; index += 1) serverToPublicPosition(large, { line: index * 70, character: 6 }, "utf-16");
+    expect(lineTableStats().builds - before).toBe(1);
+    expect(serverToPublicPosition(large, { line: 29_999, character: 6 }, "utf-16")).toEqual({ line: 30_000, character: 7 });
+  });
+
+  it("charges the line-table memo for line offsets, not just text length", () => {
+    // A file of many short lines costs far more in offsets than in characters; a budget that
+    // counted only text length would understate what the cache retains by several times.
+    const shortLines = "ab\n".repeat(20_000);
+    const before = lineTableStats();
+    serverToPublicPosition(shortLines, { line: 0, character: 0 }, "utf-16");
+    const after = lineTableStats();
+    expect(after.builds - before.builds).toBe(1);
+    expect(after.cost - before.cost).toBeGreaterThan(shortLines.length * 2);
   });
 });
 

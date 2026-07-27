@@ -3,8 +3,8 @@ import { navigationSchema, type NavigationInput } from "./schemas.js";
 import type { RuntimeGetter, SessionRuntime } from "./context.js";
 import { acquireSource } from "./context.js";
 import { baseDetails, envelope, rethrowUnexpected, statusFromError } from "./results.js";
-import { convertRange, normalizeLocations, type NormalizedLocation } from "../protocol/locations.js";
-import type { CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentSymbol, Hover, MarkedString, SymbolInformation } from "../protocol/types.js";
+import { convertRange, hasStaleRange, normalizeLocations, tryConvertRange, type NormalizedLocation } from "../protocol/locations.js";
+import type { CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentSymbol, Hover, MarkedString, Range, SymbolInformation } from "../protocol/types.js";
 import { sanitizeText, stableHash } from "../util/text.js";
 import { routeFile, type Route } from "../servers/routing.js";
 import { resolveExplicitRoot, resolveInputPath } from "../workspace/boundary.js";
@@ -20,6 +20,9 @@ interface NormalizedSymbol {
   selectionRange?: ReturnType<typeof convertRange>;
   location?: NormalizedLocation;
   containerName?: string;
+  rawRange?: Range;
+  rawSelectionRange?: Range;
+  positionEncoding?: PositionEncoding;
 }
 
 export function registerNavigationTool(pi: ExtensionAPI, getRuntime: RuntimeGetter): void {
@@ -70,8 +73,12 @@ export function registerNavigationTool(pi: ExtensionAPI, getRuntime: RuntimeGett
           const raw = await source.client.request<Array<DocumentSymbol | SymbolInformation> | null>("textDocument/documentSymbol", { textDocument: { uri: source.snapshot.uri } }, signal) ?? [];
           const normalized = await normalizeDocumentSymbols(raw, source.snapshot.text, source.route.root, runtime.boundary, capabilities.positionEncoding, limit);
           const symbols = normalized.symbols;
-          const text = symbols.map((item) => `${"  ".repeat(item.depth)}${item.name} (${item.kind})${item.range ? ` ${item.range.start.line}:${item.range.start.character}` : item.location ? ` ${item.location.path ?? item.location.uri}:${item.location.range.start.line}` : ""}`).join("\n") || "No symbols.";
-          return envelope(text, { ...baseDetails(params.operation, symbols.length ? "ok" : "no_results", started), server: source.route.server.id, root: source.route.root, symbols, total: normalized.totalAtLeast, totalAtLeast: normalized.totalAtLeast, truncated: normalized.truncated, warnings: normalized.depthCapped ? ["Document-symbol hierarchy exceeded the depth limit."] : [], contentHash: source.snapshot.contentHash, version: source.snapshot.version });
+          const text = symbols.map((item) => `${"  ".repeat(item.depth)}${item.name} (${item.kind})${renderSymbolPosition(item)}`).join("\n") || "No symbols.";
+          const symbolWarnings = [
+            ...(normalized.depthCapped ? ["Document-symbol hierarchy exceeded the depth limit."] : []),
+            ...(normalized.unresolvedRanges ? [`${normalized.unresolvedRanges} symbol(s) had a range that did not match the synchronized document; each unconvertible range is preserved as rawRange or rawSelectionRange with positionEncoding.`] : []),
+          ];
+          return envelope(text, { ...baseDetails(params.operation, symbols.length ? "ok" : "no_results", started), server: source.route.server.id, root: source.route.root, symbols, total: normalized.totalAtLeast, totalAtLeast: normalized.totalAtLeast, truncated: normalized.truncated, warnings: symbolWarnings, contentHash: source.snapshot.contentHash, version: source.snapshot.version });
         }
 
         if (params.operation === "incoming_calls" || params.operation === "outgoing_calls") return await callHierarchy(runtime, source, params, limit, started, signal);
@@ -89,7 +96,12 @@ export function registerNavigationTool(pi: ExtensionAPI, getRuntime: RuntimeGett
         const raw = await source.client.request<unknown>(method[params.operation]!, request, signal);
         const normalized = await normalizeLocations(raw, source.route.root, runtime.boundary, capabilities.positionEncoding, limit, source.snapshot.text);
         const text = normalized.locations.map(renderLocation).join("\n") || "No results.";
-        return envelope(text, { ...baseDetails(params.operation, normalized.locations.length ? "ok" : "no_results", started), server: source.route.server.id, root: source.route.root, ...normalized, contentHash: source.snapshot.contentHash, version: source.snapshot.version, possiblyIncomplete: source.client.progress.size > 0 });
+        const staleRanges = normalized.locations.filter(hasStaleRange).length;
+        const locationWarnings = [
+          ...(staleRanges ? [`${staleRanges} location(s) did not match the current file contents; their raw server ranges are preserved. The server index may be stale.`] : []),
+          ...(normalized.rejected ? [`${normalized.rejected} result(s) were not a recognizable Location or LocationLink and were dropped.`] : []),
+        ];
+        return envelope(text, { ...baseDetails(params.operation, normalized.locations.length ? "ok" : "no_results", started), server: source.route.server.id, root: source.route.root, ...normalized, contentHash: source.snapshot.contentHash, version: source.snapshot.version, possiblyIncomplete: source.client.progress.size > 0, warnings: locationWarnings });
         });
         } finally { source.release(); }
       } catch (error) {
@@ -168,18 +180,26 @@ async function normalizeCallItem(item: CallHierarchyItem, runtime: SessionRuntim
   return { name: sanitizeText(item.name, 500), kind: item.kind, ...(item.detail ? { detail: sanitizeText(item.detail, 1_000) } : {}), location, rawSelectionRange: item.selectionRange, positionEncoding: encoding };
 }
 
-async function normalizeDocumentSymbols(items: Array<DocumentSymbol | SymbolInformation>, sourceText: string, root: string, boundary: string, encoding: PositionEncoding, limit: number): Promise<{ symbols: NormalizedSymbol[]; totalAtLeast: number; truncated: boolean; depthCapped: boolean }> {
+async function normalizeDocumentSymbols(items: Array<DocumentSymbol | SymbolInformation>, sourceText: string, root: string, boundary: string, encoding: PositionEncoding, limit: number): Promise<{ symbols: NormalizedSymbol[]; totalAtLeast: number; truncated: boolean; depthCapped: boolean; unresolvedRanges: number }> {
   const symbols: NormalizedSymbol[] = [];
   let totalAtLeast = 0;
   let truncated = false;
   let depthCapped = false;
+  let unresolvedRanges = 0;
   const visit = async (entries: Array<DocumentSymbol | SymbolInformation>, depth: number): Promise<boolean> => {
     if (depth > 64) { depthCapped = true; truncated = true; return false; }
     for (const item of entries) {
       totalAtLeast += 1;
       if (symbols.length >= limit) { truncated = true; return false; }
       if (isDocumentSymbol(item)) {
-        symbols.push({ name: sanitizeText(item.name, 500), ...(item.detail ? { detail: sanitizeText(item.detail, 1_000) } : {}), kind: item.kind, depth, range: convertRange(sourceText, item.range, encoding), selectionRange: convertRange(sourceText, item.selectionRange, encoding) });
+        // A symbol whose range does not fit the synchronized text is reported without a public
+        // range rather than failing the whole outline. The two ranges are independent: each keeps
+        // its own raw server range when it fails, so a raw range never stands in for a sibling
+        // that converted cleanly.
+        const range = tryConvertRange(sourceText, item.range, encoding);
+        const selectionRange = tryConvertRange(sourceText, item.selectionRange, encoding);
+        if (!range || !selectionRange) unresolvedRanges += 1;
+        symbols.push({ name: sanitizeText(item.name, 500), ...(item.detail ? { detail: sanitizeText(item.detail, 1_000) } : {}), kind: item.kind, depth, ...(range ? { range } : { rawRange: item.range }), ...(selectionRange ? { selectionRange } : { rawSelectionRange: item.selectionRange }), ...(range && selectionRange ? {} : { positionEncoding: encoding }) });
         if (!await visit(item.children ?? [], depth + 1)) return false;
       } else {
         const location = item.location && "uri" in item.location && item.location.range ? (await normalizeLocations(item.location, root, boundary, encoding, 1)).locations[0] : undefined;
@@ -189,7 +209,7 @@ async function normalizeDocumentSymbols(items: Array<DocumentSymbol | SymbolInfo
     return true;
   };
   await visit(items, 0);
-  return { symbols, totalAtLeast, truncated, depthCapped };
+  return { symbols, totalAtLeast, truncated, depthCapped, unresolvedRanges };
 }
 
 function isDocumentSymbol(item: DocumentSymbol | SymbolInformation): item is DocumentSymbol { return "range" in item && "selectionRange" in item; }
@@ -207,4 +227,10 @@ function normalizeHover(hover: Hover | null): string {
   return sanitizeText(value.value);
 }
 function renderMarkedString(value: MarkedString): string { return typeof value === "string" ? value : `\`\`\`${value.language}\n${value.value}\n\`\`\``; }
-function renderLocation(item: NormalizedLocation): string { return `${item.external ? "[external] " : ""}${item.path ?? item.uri}:${item.range.start.line}${item.range.start.character !== undefined ? `:${item.range.start.character}` : ""}`; }
+function renderLocation(item: NormalizedLocation): string { return `${item.external ? "[external] " : ""}${hasStaleRange(item) ? "[stale range] " : ""}${item.path ?? item.uri}:${item.range.start.line}${item.range.start.character !== undefined ? `:${item.range.start.character}` : ""}`; }
+function renderSymbolPosition(item: NormalizedSymbol): string {
+  if (item.range) return ` ${item.range.start.line}:${item.range.start.character}`;
+  if (item.rawRange) return ` [stale range] ${item.rawRange.start.line + 1}`;
+  if (item.location) return ` ${item.location.path ?? item.location.uri}:${item.location.range.start.line}`;
+  return "";
+}

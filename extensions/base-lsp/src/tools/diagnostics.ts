@@ -7,7 +7,7 @@ import { discoverFiles, type DiscoveryResult } from "../workspace/files.js";
 import { resolveExplicitRoot, resolveInputPath } from "../workspace/boundary.js";
 import { routeFile, type Route } from "../servers/routing.js";
 import { baseDetails, envelope, rethrowUnexpected, statusFromError, type ToolStatus } from "./results.js";
-import { serverToPublicPosition } from "../protocol/positions.js";
+import { lineOnlyRange, tryConvertRange } from "../protocol/locations.js";
 import type { Diagnostic } from "../protocol/types.js";
 import type { DocumentSnapshot } from "../runtime/document-store.js";
 import type { DiagnosticEvidence } from "../protocol/diagnostics.js";
@@ -50,6 +50,7 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
         const evidence: Array<Record<string, unknown>> = [];
         let emittedDiagnostics = 0;
         let omittedDiagnostics = 0;
+        let unresolvedRanges = 0;
         for (const entry of rawEvidence) {
           omittedDiagnostics += entry.result.omittedDiagnostics ?? 0;
           const filtered = entry.result.diagnostics.filter((diagnostic) => severityMatches(diagnostic, params.severity ?? "all"));
@@ -63,6 +64,8 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
             try { normalized = displayed.map((diagnostic) => normalizeDiagnostic(diagnostic, entry.snapshot!.text, entry.client!.capabilities!.positionEncoding)); }
             catch (error) { normalizationError = error instanceof Error ? error.message : String(error); }
           }
+          const unresolvedHere = normalized.filter((diagnostic) => diagnostic.rangeUnresolved).length;
+          unresolvedRanges += unresolvedHere;
           evidence.push({
             path: relative(entry.item.route.root, entry.item.file) || ".",
             server: entry.item.route.server.id,
@@ -71,6 +74,7 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
             underlyingDiagnosticCount: entry.result.diagnostics.length + (entry.result.omittedDiagnostics ?? 0),
             filteredDiagnosticCount: filtered.length,
             possiblyStale: entry.result.possiblyStale ?? false,
+            ...(unresolvedHere ? { unresolvedRanges: unresolvedHere } : {}),
             ...(entry.result.confirmation ? { confirmation: entry.result.confirmation } : {}),
             diagnostics: normalized,
             ...(normalizationError ? { message: `Malformed diagnostic range: ${normalizationError}` } : entry.result.message ? { message: entry.result.message } : {}),
@@ -90,16 +94,21 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
         }
         const unavailableServers = [...unavailableByServer.values()];
         let status = aggregateStatus(states, affirmative);
-        if ((inventory.capped || omittedDiagnostics > 0 || omittedWorkspaceReports > 0) && status === "ok") status = "partial";
+        if ((inventory.capped || omittedDiagnostics > 0 || omittedWorkspaceReports > 0 || unresolvedRanges > 0) && status === "ok") status = "partial";
         const warnings: string[] = [];
         if (inventory.capped) warnings.push(inventory.omittedUnknown ? `Discovery was capped; at least ${inventory.omitted} matching file(s) were omitted and additional files may be undiscovered.` : `Discovery was capped; ${inventory.omitted} matching file(s) were omitted.`);
         if (omittedDiagnostics) warnings.push(`${omittedDiagnostics} diagnostic(s) were omitted by the output limit.`);
         if (omittedWorkspaceReports) warnings.push(`${omittedWorkspaceReports} additional workspace diagnostic report(s) were omitted.`);
+        if (unresolvedRanges) warnings.push(`${unresolvedRanges} diagnostic range(s) did not fit the synchronized document; their raw server ranges are preserved and public columns omitted. The server may be reporting against an older version.`);
         if (unavailableServers.length) warnings.push(`${unavailableServers.length} server/root group(s) were unavailable; per-file evidence is retained in details.`);
         const emittedUnavailable = new Set<string>();
         const lines = evidence.flatMap((entry) => {
           const diagnostics = entry.diagnostics as Array<Record<string, unknown>>;
-          if (diagnostics.length) return diagnostics.map((diagnostic) => `${entry.server} ${entry.path}:${(diagnostic.range as any).start.line}:${(diagnostic.range as any).start.character} ${diagnostic.severity} ${diagnostic.message}`);
+          if (diagnostics.length) return diagnostics.map((diagnostic) => {
+            const start = (diagnostic.range as { start: { line: number; character?: number } }).start;
+            const column = start.character !== undefined ? `:${start.character}` : "";
+            return `${entry.server} ${entry.path}:${start.line}${column} ${diagnostic.rangeUnresolved ? "[stale range] " : ""}${diagnostic.severity} ${diagnostic.message}`;
+          });
           if (entry.state === "unavailable") {
             const key = `${entry.server}\0${entry.root}`;
             if (emittedUnavailable.has(key)) return [];
@@ -112,7 +121,7 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
           const suffix = entry.state === "diagnostics" && filtered === 0 ? " (findings exist but none match the severity filter)" : entry.message ? ` (${entry.message})` : "";
           return [`${entry.server} ${entry.path}: ${entry.state}${suffix}`];
         });
-        return envelope(lines.join("\n"), { ...baseDetails("diagnostics", status, started), servers: serverRuns, unavailableServers, coverage: { requested: states.length, affirmative, unavailable: states.filter((state) => state === "unavailable").length, unconfirmed: states.filter((state) => state === "unconfirmed").length }, files: evidence, discovery: inventory, omittedDiagnostics, omittedWorkspaceReports, truncated: omittedDiagnostics > 0 || omittedWorkspaceReports > 0 || inventory.capped, warnings });
+        return envelope(lines.join("\n"), { ...baseDetails("diagnostics", status, started), servers: serverRuns, unavailableServers, coverage: { requested: states.length, affirmative, unavailable: states.filter((state) => state === "unavailable").length, unconfirmed: states.filter((state) => state === "unconfirmed").length }, files: evidence, discovery: inventory, omittedDiagnostics, omittedWorkspaceReports, unresolvedRanges, truncated: omittedDiagnostics > 0 || omittedWorkspaceReports > 0 || inventory.capped, warnings });
       } catch (error) {
         rethrowUnexpected(error);
         const status = statusFromError(error);
@@ -254,11 +263,18 @@ function aggregateStatus(states: string[], affirmative: number): ToolStatus {
 }
 function evidenceStateFromError(error: unknown): DiagnosticEvidence["state"] { const status = statusFromError(error); return status === "timed_out" || status === "cancelled" || status === "unavailable" ? status : "error"; }
 function severityMatches(diagnostic: Diagnostic, severity: string): boolean { const wanted: Record<string, number> = { error: 1, warning: 2, information: 3, hint: 4 }; return severity === "all" || diagnostic.severity === wanted[severity]; }
+/**
+ * A push diagnostic is inherently asynchronous with respect to the snapshot we hold, so its range
+ * may not fit the text we can see. That is one bad range, not a reason to discard every finding for
+ * the file: the public columns are dropped and the raw server range preserved, as locations do.
+ */
 function normalizeDiagnostic(diagnostic: Diagnostic, text: string, encoding: "utf-8" | "utf-16" | "utf-32"): Record<string, unknown> {
+  const converted = tryConvertRange(text, diagnostic.range, encoding);
   return {
     message: sanitizeText(diagnostic.message, 4_000),
     severity: ["unknown", "error", "warning", "information", "hint"][diagnostic.severity ?? 0] ?? "unknown",
-    range: { start: serverToPublicPosition(text, diagnostic.range.start, encoding), end: serverToPublicPosition(text, diagnostic.range.end, encoding) },
+    range: converted ?? lineOnlyRange(diagnostic.range),
+    ...(converted ? {} : { rangeUnresolved: "out-of-range" as const, rawRange: diagnostic.range, positionEncoding: encoding }),
     ...(diagnostic.source ? { source: sanitizeText(diagnostic.source, 500) } : {}),
     ...(diagnostic.code !== undefined ? { code: sanitizeText(typeof diagnostic.code === "object" ? diagnostic.code.value : diagnostic.code, 500) } : {}),
     ...(diagnostic.codeDescription?.href ? { codeDescription: sanitizeText(diagnostic.codeDescription.href, 2_000) } : {}),

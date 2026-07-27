@@ -148,6 +148,8 @@ Example:
 
 Locations, `LocationLink`, hierarchical/flat symbols, hover variants, workspace-symbol resolution, and call-hierarchy preparation are normalized. Local locations use 1-based UTF-16 columns. External or non-file targets are marked `external`; when their text cannot safely be read, the result preserves `rawRange` and `positionEncoding` and does not invent a public column.
 
+Every range is resolved independently, so one that cannot be converted never suppresses a sibling that can. A range is unresolved either because the target text was unreadable (`text-unavailable`) or because the server's range does not fit the text we can see (`out-of-range`, normally a stale server index). The reason appears as `rangeUnresolved`, `selectionRangeUnresolved`, or `originSelectionRangeUnresolved`, and the corresponding `rawRange`, `rawSelectionRange`, or `rawOriginSelectionRange` is preserved alongside `positionEncoding`. Stale results are counted in `warnings` and marked `[stale range]` in the text output; entries too malformed to interpret at all are counted in `rejected`. Diagnostics follow the same rule — one unconvertible range no longer discards the other findings for that file.
+
 If call-hierarchy preparation returns multiple items, select a fresh stable `itemId` on a second request. Active server progress makes results `possiblyIncomplete`.
 
 ### `lsp_code_actions`

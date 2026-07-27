@@ -82,6 +82,75 @@ describe("location normalization", () => {
     expect(result.locations[0]!.range.start.character).toBeUndefined();
   });
 
+  it("keeps valid locations when a sibling location does not fit its target file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-location-stale-"));
+    const path = join(root, "a.ts");
+    await writeFile(path, "const alpha = 1;\nconsole.log(alpha);\n");
+    const uri = pathToFileURL(path).href;
+    const good = { uri, range: { start: { line: 1, character: 12 }, end: { line: 1, character: 17 } } };
+    // A stale server index can report a range past the end of the file as it exists now.
+    const stale = { uri, range: { start: { line: 40, character: 0 }, end: { line: 40, character: 3 } } };
+    const result = await normalizeLocations([good, stale], root, root, "utf-16", 10);
+    expect(result.locations).toHaveLength(2);
+    expect(result.truncated).toBe(false);
+    const resolved = result.locations.find((item) => item.rangeUnresolved === undefined)!;
+    expect(resolved.range).toMatchObject({ start: { line: 2, character: 13 } });
+    const unresolved = result.locations.find((item) => item.rangeUnresolved !== undefined)!;
+    expect(unresolved).toMatchObject({ rangeUnresolved: "out-of-range", rawRange: { start: { line: 40, character: 0 } }, positionEncoding: "utf-16" });
+    expect(unresolved.range.start.character).toBeUndefined();
+  });
+
+  it("counts only limit-based omissions as truncation and reports rejected entries", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-location-truncation-"));
+    const malformed = { notALocation: true };
+    const result = await normalizeLocations([malformed, malformed], root, root, "utf-16", 10);
+    expect(result.locations).toHaveLength(0);
+    expect(result.truncated).toBe(false);
+    // Dropping unrecognizable entries must stay visible even though it is not truncation.
+    expect(result.rejected).toBe(2);
+    expect(result.total).toBe(2);
+
+    const limited = await normalizeLocations([malformed, malformed], root, root, "utf-16", 1);
+    expect(limited.truncated).toBe(true);
+    expect(limited.rejected).toBe(1);
+  });
+
+  it("preserves each unconvertible range independently of its siblings", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-location-parts-"));
+    const path = join(root, "a.ts");
+    await writeFile(path, "const alpha = 1;\nconsole.log(alpha);\n");
+    const uri = pathToFileURL(path).href;
+    // targetRange fits the file, but the selection range names a column past the end of its line —
+    // what a server reports when its index predates an edit. The selection range must not vanish.
+    const link = {
+      targetUri: uri,
+      targetRange: { start: { line: 1, character: 0 }, end: { line: 1, character: 0 } },
+      targetSelectionRange: { start: { line: 1, character: 400 }, end: { line: 1, character: 405 } },
+      originSelectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 11 } },
+    };
+    const result = await normalizeLocations([link], root, root, "utf-16", 10, "const alpha = 1;\n");
+    const item = result.locations[0]!;
+    expect(item.range).toMatchObject({ start: { line: 2, character: 1 } });
+    expect(item.rangeUnresolved).toBeUndefined();
+    expect(item.rawRange).toBeUndefined();
+    expect(item.selectionRange).toBeUndefined();
+    expect(item).toMatchObject({ selectionRangeUnresolved: "out-of-range", rawSelectionRange: { start: { line: 1, character: 400 } } });
+    // The origin range converts against the origin text, so it is unaffected by the target failure.
+    expect(item.originSelectionRange).toMatchObject({ start: { line: 1, character: 7 } });
+    expect(item.originSelectionRangeUnresolved).toBeUndefined();
+  });
+
+  it("resolves ranges against a readable but empty target file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-location-empty-"));
+    const path = join(root, "empty.ts");
+    await writeFile(path, "");
+    const uri = pathToFileURL(path).href;
+    const result = await normalizeLocations({ uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }, root, root, "utf-16", 10);
+    // An empty file was read successfully, so this is not "text-unavailable".
+    expect(result.locations[0]).toMatchObject({ external: false, range: { start: { line: 1, character: 1 } } });
+    expect(result.locations[0]!.rangeUnresolved).toBeUndefined();
+  });
+
   it("does not read an in-boundary symlink whose canonical target is external", async () => {
     const root = await mkdtemp(join(tmpdir(), "base-lsp-location-root-"));
     const outside = join(await mkdtemp(join(tmpdir(), "base-lsp-location-outside-")), "secret.ts");

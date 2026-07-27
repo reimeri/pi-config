@@ -29,8 +29,8 @@ export function serverRangeToOffsets(text: string, range: Range, encoding: Posit
 
 export function offsetsToServerRange(text: string, start: number, end: number, encoding: PositionEncoding): Range {
   if (start < 0 || end < start || end > text.length) throw new Error("Invalid offsets");
-  const lines = lineInfos(text);
-  return { start: offsetPosition(lines, start, encoding), end: offsetPosition(lines, end, encoding) };
+  const table = lineTable(text);
+  return { start: offsetPosition(text, table, start, encoding), end: offsetPosition(text, table, end, encoding) };
 }
 
 export function resolveSymbolPosition(text: string, publicLine: number, locator: string): { character: number; candidates: number[] } {
@@ -102,33 +102,83 @@ function assertUtf16Boundary(line: string, offset: number): void {
 }
 function getLine(text: string, index: number): LineInfo {
   if (!Number.isSafeInteger(index) || index < 0) throw new Error("Invalid line");
-  const lines = lineInfos(text);
-  const line = lines[index];
-  if (!line) throw new Error(`Line ${index + 1} exceeds document length`);
-  return line;
+  const table = lineTable(text);
+  const start = table.starts[index];
+  const end = table.ends[index];
+  if (start === undefined || end === undefined) throw new Error(`Line ${index + 1} exceeds document length`);
+  return { start, text: text.slice(start, end) };
 }
-function lineInfos(text: string): LineInfo[] {
-  const result: LineInfo[] = [];
-  let start = 0;
+
+/** Half-open bounds of every line, excluding its newline sequence. */
+interface LineTable { starts: number[]; ends: number[] }
+
+/**
+ * Content-addressed memo of line tables. Callers convert many positions against the same document
+ * text — one per symbol, per edit, or per diagnostic — and rebuilding the table each time made
+ * conversion O(document) instead of O(1). Keying on the text itself keeps the memo correct by
+ * construction: differing content can never share a table.
+ *
+ * The budget is charged in estimated bytes, not characters: a file of many short lines costs far
+ * more in line offsets than in text, so counting only `text.length` would understate what the
+ * cache retains by several times. Entries are capped too, since many small documents cost mostly
+ * per-entry overhead that no size estimate captures.
+ */
+interface CacheEntry { table: LineTable; cost: number }
+const tableCache = new Map<string, CacheEntry>();
+let cachedCost = 0;
+let builds = 0;
+const MAX_CACHED_COST = 16 * 1024 * 1024;
+const MAX_CACHED_ENTRIES = 64;
+
+/** Observability hook: how many tables were built, and what the memo currently retains. */
+export function lineTableStats(): { builds: number; entries: number; cost: number } {
+  return { builds, entries: tableCache.size, cost: cachedCost };
+}
+
+function lineTable(text: string): LineTable {
+  const cached = tableCache.get(text);
+  if (cached) {
+    tableCache.delete(text);
+    tableCache.set(text, cached);
+    return cached.table;
+  }
+  const table = buildLineTable(text);
+  builds += 1;
+  const cost = text.length * 2 + (table.starts.length + table.ends.length) * 8;
+  tableCache.set(text, { table, cost });
+  cachedCost += cost;
+  while (tableCache.size > 1 && (cachedCost > MAX_CACHED_COST || tableCache.size > MAX_CACHED_ENTRIES)) {
+    const oldest = tableCache.keys().next().value as string;
+    cachedCost -= tableCache.get(oldest)!.cost;
+    tableCache.delete(oldest);
+  }
+  return table;
+}
+
+function buildLineTable(text: string): LineTable {
+  const starts: number[] = [0];
+  const ends: number[] = [];
   for (let index = 0; index < text.length; index += 1) {
     const char = text.charCodeAt(index);
     if (char === 10 || char === 13) {
-      result.push({ start, text: text.slice(start, index) });
+      ends.push(index);
       if (char === 13 && text.charCodeAt(index + 1) === 10) index += 1;
-      start = index + 1;
+      starts.push(index + 1);
     }
   }
-  result.push({ start, text: text.slice(start) });
-  return result;
+  ends.push(text.length);
+  return { starts, ends };
 }
-function offsetPosition(lines: LineInfo[], offset: number, encoding: PositionEncoding): Position {
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index]!;
-    if (offset >= line.start) {
-      const local = offset - line.start;
-      if (local > line.text.length) throw new Error("Offset points inside a newline sequence");
-      return { line: index, character: utf16ToEncoded(line.text, local, encoding) };
-    }
+
+function offsetPosition(text: string, table: LineTable, offset: number, encoding: PositionEncoding): Position {
+  let low = 0;
+  let high = table.starts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if (table.starts[mid]! <= offset) low = mid; else high = mid - 1;
   }
-  throw new Error("Invalid offset");
+  const start = table.starts[low]!;
+  const end = table.ends[low]!;
+  if (offset > end) throw new Error("Offset points inside a newline sequence");
+  return { line: low, character: utf16ToEncoded(text.slice(start, end), offset - start, encoding) };
 }

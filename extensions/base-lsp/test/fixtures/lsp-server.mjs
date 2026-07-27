@@ -137,6 +137,8 @@ function documentDiagnostic(uri, previousResultId) {
   const offset = document.text.indexOf("ERROR");
   const count = Math.max(1, Number(process.env.FAKE_LSP_MANY_DIAGNOSTICS ?? 1));
   const items = offset < 0 ? [] : Array.from({ length: count }, (_, index) => ({ range: offsetRange(document.text, offset, 5), severity: 1, source: "fake", message: `fake error ${index + 1}` }));
+  // A server whose index predates an edit reports a range that no longer fits the document.
+  if (process.env.FAKE_LSP_STALE_RANGE === "1") items.push({ range: range(400, 0, 400, 3), severity: 1, source: "fake", message: "stale range error" });
   return { kind: "full", resultId, items };
 }
 async function publish(uri) {
