@@ -1,3 +1,4 @@
+import type { Stats } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { stableHash } from "../util/text.js";
 import { AsyncMutex, KeyedMutex, throwIfAborted, withDeadline } from "../util/async.js";
@@ -15,6 +16,9 @@ export interface OpenDocument {
   contentHash: string;
   text: string;
   mtimeMs: number;
+  size: number;
+  /** When the read behind `text` began; see `isUnchangedOnDisk`. */
+  readAtMs: number;
   lastUse: number;
 }
 export interface DocumentSnapshot extends OpenDocument { syncState: "opened" | "changed" | "unchanged" }
@@ -100,17 +104,21 @@ export class DocumentStore {
     catch (error) { await this.close(path); throw error; }
     if (!info.isFile()) throw new Error(`Not a regular file: ${path}`);
     if (info.size > this.maxFileBytes) throw new Error(`File exceeds synchronization limit (${this.maxFileBytes} bytes): ${path}`);
+    const existing = this.documents.get(path);
+    // A diagnostics sweep re-synchronizes every open document, and almost all of them are untouched
+    // since the last one. Recognising that from the stat alone skips reading and hashing the file.
+    if (existing && this.isUnchangedOnDisk(existing, info)) { existing.lastUse = Date.now(); return { ...existing, syncState: "unchanged" }; }
+    const readAtMs = Date.now();
     const text = await readFile(path, "utf8");
     throwIfAborted(signal);
     const hash = stableHash(text);
-    const existing = this.documents.get(path);
-    if (existing && existing.contentHash === hash) { existing.mtimeMs = info.mtimeMs; existing.lastUse = Date.now(); return { ...existing, syncState: "unchanged" }; }
+    if (existing && existing.contentHash === hash) { Object.assign(existing, { mtimeMs: info.mtimeMs, size: info.size, readAtMs, lastUse: Date.now() }); return { ...existing, syncState: "unchanged" }; }
     if (this.capabilities.syncKind === 0) throw new Error(`Server ${this.server.id} does not support document synchronization`);
     const uri = filePathToUri(path);
     const languageId = languageIdFor(this.server, path) ?? "plaintext";
     if (!existing) {
       const openVersion = (this.versionFloor.get(path) ?? 0) + 1;
-      const document: OpenDocument = { uri, canonicalPath: path, languageId, version: openVersion, contentHash: hash, text, mtimeMs: info.mtimeMs, lastUse: Date.now() };
+      const document: OpenDocument = { uri, canonicalPath: path, languageId, version: openVersion, contentHash: hash, text, mtimeMs: info.mtimeMs, size: info.size, readAtMs, lastUse: Date.now() };
       await this.registryMutex.run(async () => {
         await this.evictIfNeeded(signal);
         this.documents.set(path, document);
@@ -127,9 +135,27 @@ export class DocumentStore {
       : [{ text }];
     await this.notify("textDocument/didChange", { textDocument: { uri, version }, contentChanges });
     this.versionFloor.set(path, version);
-    Object.assign(existing, { version, contentHash: hash, text, mtimeMs: info.mtimeMs, lastUse: Date.now() });
+    Object.assign(existing, { version, contentHash: hash, text, mtimeMs: info.mtimeMs, size: info.size, readAtMs, lastUse: Date.now() });
     this.recordSynced(path, hash);
     return { ...existing, syncState: "changed" };
+  }
+  /**
+   * Whether `document` still matches the file `info` describes, without reading it back.
+   *
+   * Size and modification time alone would not be enough. Same-length edits are ordinary here — an
+   * agent flipping a digit or a boolean leaves the byte count untouched — so a write landing in the
+   * same clock tick as the time already recorded would be invisible, and the server would keep
+   * answering from content that no longer exists on disk. Requiring the recorded time to be
+   * strictly older than the moment its read began closes that window: it establishes that the
+   * modification behind the cached text completed before the read, so any write after the read must
+   * carry a later time and will be noticed. Git applies the same rule to its index and calls the
+   * entries this excludes racily clean.
+   *
+   * A file whose timestamp sits in the future, or one whose mtime is not updated on write at all,
+   * simply never takes this path and is re-read as before.
+   */
+  private isUnchangedOnDisk(document: OpenDocument, info: Stats): boolean {
+    return info.size === document.size && info.mtimeMs === document.mtimeMs && info.mtimeMs < document.readAtMs;
   }
   /**
    * Announce content the server has not seen before. A first sync is not announced: the server has

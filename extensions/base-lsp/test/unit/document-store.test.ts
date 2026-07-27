@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DocumentStore } from "../../src/runtime/document-store.js";
@@ -11,6 +11,96 @@ const capabilities: NormalizedCapabilities = {
   declaration: false, definition: false, typeDefinition: false, implementation: false, references: false, hover: false, documentSymbols: false,
   workspaceSymbols: false, workspaceSymbolResolve: false, callHierarchy: false, codeActions: false, codeActionResolve: false, rename: false, prepareRename: false, executeCommands: [],
 };
+
+describe("unchanged-document detection", () => {
+  const store = (methods: string[] = []) => new DocumentStore(fakeServer(), capabilities, async (method) => { methods.push(method); }, 10, 1024 * 1024);
+
+  it("catches a same-length rewrite, however fast it follows the last sync", async () => {
+    // The hazard in trusting size and modification time: an agent flipping a digit or a boolean
+    // leaves the byte count untouched, and back-to-back edits can land within one clock tick.
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-samesize-"));
+    const path = join(root, "a.ts");
+    const documents = store();
+    await writeFile(path, "export const v = 0;\n");
+    expect((await documents.sync(path)).syncState).toBe("opened");
+    for (let value = 1; value < 40; value++) {
+      await writeFile(path, `export const v = ${value % 10};\n`);
+      const snapshot = await documents.sync(path);
+      expect(snapshot.syncState, `edit ${value}`).toBe("changed");
+      expect(snapshot.text, `edit ${value}`).toBe(`export const v = ${value % 10};\n`);
+    }
+  });
+
+  it("catches a rewrite that keeps the recorded modification time", async () => {
+    // Pinning mtime back after the write is what a stale-cache bug looks like from the outside.
+    // Only the racily-clean rule — the timestamp must predate the read that cached the text —
+    // separates this from the trusted case below.
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-racy-"));
+    const path = join(root, "a.ts");
+    const pinned = new Date(Date.now() + 60_000);
+    await writeFile(path, "const v = 1;\n");
+    await utimes(path, pinned, pinned);
+    const documents = store();
+    expect((await documents.sync(path)).syncState).toBe("opened");
+    await writeFile(path, "const v = 2;\n");
+    await utimes(path, pinned, pinned);
+    const snapshot = await documents.sync(path);
+    expect(snapshot.syncState).toBe("changed");
+    expect(snapshot.text).toBe("const v = 2;\n");
+  });
+
+  it("catches a length change that keeps the recorded modification time", async () => {
+    // Timestamp deliberately old enough to be trusted, so only the size comparison rejects this.
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-size-"));
+    const path = join(root, "a.ts");
+    const past = new Date(Date.now() - 60_000);
+    await writeFile(path, "const v = 1;\n");
+    await utimes(path, past, past);
+    const documents = store();
+    await documents.sync(path);
+    await writeFile(path, "const v = 1; // appended\n");
+    await utimes(path, past, past);
+    const snapshot = await documents.sync(path);
+    expect(snapshot.syncState).toBe("changed");
+    expect(snapshot.text).toBe("const v = 1; // appended\n");
+  });
+
+  it("skips the read when size and modification time both hold steady", async () => {
+    // Proving the fast path engages by observing its deliberate blind spot: a file rewritten to the
+    // same length with its old timestamp restored is indistinguishable from an untouched one. That
+    // takes an external actor preserving timestamps (`cp -p`, `rsync --times`); ordinary writes
+    // move mtime forward and are caught by the test above.
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-fastpath-"));
+    const path = join(root, "a.ts");
+    const past = new Date(Date.now() - 60_000);
+    await writeFile(path, "const v = 1;\n");
+    await utimes(path, past, past);
+    const documents = store();
+    await documents.sync(path);
+    await writeFile(path, "const v = 2;\n");
+    await utimes(path, past, past);
+    const snapshot = await documents.sync(path);
+    expect(snapshot.syncState).toBe("unchanged");
+    expect(snapshot.text).toBe("const v = 1;\n");
+  });
+
+  it("reports a length change and a touched-but-identical file correctly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-states-"));
+    const path = join(root, "a.ts");
+    const methods: string[] = [];
+    const documents = store(methods);
+    await writeFile(path, "const v = 1;\n");
+    await documents.sync(path);
+
+    await writeFile(path, "const v = 1; // longer now\n");
+    expect((await documents.sync(path)).syncState).toBe("changed");
+
+    // Rewriting identical bytes moves mtime but is not an edit; the server must not be told it is.
+    await writeFile(path, "const v = 1; // longer now\n");
+    expect((await documents.sync(path)).syncState).toBe("unchanged");
+    expect(methods).toEqual(["textDocument/didOpen", "textDocument/didChange"]);
+  });
+});
 
 describe("document synchronization ordering", () => {
   it("enforces maxOpen atomically across concurrent URI synchronizations", async () => {
