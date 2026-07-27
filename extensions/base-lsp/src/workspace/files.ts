@@ -50,7 +50,9 @@ async function walk(directory: string, root: string, boundary: string, servers: 
       continue;
     }
     if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-    if (!servers.some((server) => matchesServerFile(server, path))) continue;
+    // `entry.name` is already the base name `matchesServerFile` would recover from `path`, and this
+    // runs once per server per entry, so pass it straight through.
+    if (!servers.some((server) => matchesServerName(server, entry.name))) continue;
     const canonicalFile = await realpath(path).catch(() => undefined);
     if (!canonicalFile || !isContained(boundary, canonicalFile)) continue;
     const info = await stat(canonicalFile).catch(() => undefined);
@@ -61,15 +63,51 @@ async function walk(directory: string, root: string, boundary: string, servers: 
   }
 }
 
-export function matchesServerFile(server: ServerDefinition, filePath: string): boolean {
-  const name = filePath.slice(Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\")) + 1);
+/**
+ * Extensions ordered longest-first, cached per definition. Sorting matters only where the *most
+ * specific* match is wanted (`.d.ts` ahead of `.ts`), and a discovery sweep asks that of every
+ * server for every path, so the order is derived once. Definitions are replaced wholesale on a
+ * config reload, and the weak keying lets the cached copies go with them.
+ */
+const extensionOrder = new WeakMap<ServerDefinition, string[]>();
+
+function extensionsByLength(server: ServerDefinition): string[] {
+  let ordered = extensionOrder.get(server);
+  if (!ordered) {
+    ordered = [...server.extensions].sort((a, b) => b.length - a.length);
+    extensionOrder.set(server, ordered);
+  }
+  return ordered;
+}
+
+/** The final segment of `filePath`, accepting either separator. */
+export function fileNameOf(filePath: string): string {
+  return filePath.slice(Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\")) + 1);
+}
+
+/** The longest extension of `server` that `name` ends with, if any. */
+export function matchedExtension(server: ServerDefinition, name: string): string | undefined {
+  return extensionsByLength(server).find((extension) => name.endsWith(extension));
+}
+
+/**
+ * Whether this server handles `name` — a bare file name rather than a path. Callers testing one
+ * name against many servers should derive it once with `fileNameOf` instead of per server.
+ */
+export function matchesServerName(server: ServerDefinition, name: string): boolean {
   if (server.filenames?.includes(name)) return true;
-  return [...server.extensions].sort((a, b) => b.length - a.length).some((extension) => name.endsWith(extension));
+  // Unordered on purpose: any match settles a yes/no question, so this skips the length ordering
+  // that `matchedExtension` needs.
+  return server.extensions.some((extension) => name.endsWith(extension));
+}
+
+export function matchesServerFile(server: ServerDefinition, filePath: string): boolean {
+  return matchesServerName(server, fileNameOf(filePath));
 }
 
 export function languageIdFor(server: ServerDefinition, filePath: string): string | undefined {
-  const name = filePath.slice(Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\")) + 1);
+  const name = fileNameOf(filePath);
   if (server.filenames?.includes(name)) return server.languageIds[name];
-  const extension = [...server.extensions].sort((a, b) => b.length - a.length).find((item) => name.endsWith(item));
+  const extension = matchedExtension(server, name);
   return extension ? server.languageIds[extension] : undefined;
 }
