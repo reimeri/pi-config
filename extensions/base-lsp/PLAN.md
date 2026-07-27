@@ -16,6 +16,18 @@ Target location:
 ~/.pi/agent/extensions/base-lsp/
 ```
 
+If needed you can find pi-lsp in the following location:
+
+```text
+/tmp/pi-extensions/extensions/pi-lsp
+```
+
+and pi-lens in the following location:
+
+```text
+/tmp/pi-lens
+```
+
 ## 2. Goals
 
 1. Expose high-value LSP capabilities through a small, agent-friendly tool surface.
