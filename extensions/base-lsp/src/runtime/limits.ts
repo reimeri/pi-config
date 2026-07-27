@@ -29,7 +29,8 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   mutationSettleMs: 400,
   idleClientMs: 300_000,
   maxClients: 6,
-  maxOpenDocuments: 100,
+  /** Sized so a default `maxFiles` sweep fits in one push chunk and still leaves eviction headroom. */
+  maxOpenDocuments: 128,
   maxDiscoveryEntries: 10_000,
   maxFiles: 100,
   maxDiagnostics: 300,

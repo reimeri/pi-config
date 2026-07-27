@@ -12,6 +12,8 @@ import { mergeConfig } from "../../src/config/loader.js";
 import { validateConfigFile } from "../../src/config/schema.js";
 import { isTypeScriptLanguageServer } from "../../src/servers/implementation.js";
 import { normalizeCapabilities } from "../../src/protocol/types.js";
+import { chunkBudgetMs, pushChunkSize } from "../../src/tools/diagnostics.js";
+import { DEFAULT_LIMITS } from "../../src/runtime/limits.js";
 
 async function temp(): Promise<string> { return mkdtemp(join(tmpdir(), "base-lsp-")); }
 
@@ -68,6 +70,25 @@ describe("boundary, roots and routing", () => {
     expect(routed.primary?.root).toBe(join(root, "packages", "a"));
     const outside = await temp(); await writeFile(join(outside, "secret.ts"), ""); await symlink(join(outside, "secret.ts"), join(root, "escape.ts"));
     await expect(resolveInputPath("escape.ts", root, root)).rejects.toThrow(/outside/);
+  });
+});
+
+describe("push diagnostic chunk scheduling", () => {
+  it("keeps a default-sized sweep in one chunk while reserving eviction headroom", () => {
+    // The batching win depends on a default sweep opening every file at once: if this ever splits
+    // into chunks, clean-settling waits start multiplying by chunk count again.
+    expect(pushChunkSize(DEFAULT_LIMITS.maxOpenDocuments)).toBeGreaterThanOrEqual(DEFAULT_LIMITS.maxFiles);
+    expect(pushChunkSize(DEFAULT_LIMITS.maxOpenDocuments)).toBeLessThan(DEFAULT_LIMITS.maxOpenDocuments);
+    expect(pushChunkSize(1)).toBe(1);
+    expect(pushChunkSize(3)).toBe(2);
+  });
+
+  it("gives a single chunk the whole deadline and splits it fairly otherwise", () => {
+    expect(chunkBudgetMs(1_000, 50, 100)).toBe(1_000);
+    expect(chunkBudgetMs(1_000, 100, 100)).toBe(1_000);
+    expect(chunkBudgetMs(1_000, 300, 100)).toBe(333);
+    expect(chunkBudgetMs(1_000, 101, 100)).toBe(500);
+    expect(chunkBudgetMs(0, 300, 100)).toBe(1);
   });
 });
 

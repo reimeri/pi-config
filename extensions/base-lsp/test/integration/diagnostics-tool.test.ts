@@ -17,6 +17,14 @@ function toolFor(runtime: SessionRuntime) {
   return tool;
 }
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("Condition was not met before the test deadline");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 describe("diagnostics tool scheduling", () => {
   it("summarizes unavailable servers while retaining per-file evidence", async () => {
     const root = await mkdtemp(join(tmpdir(), "base-lsp-diagnostic-unavailable-"));
@@ -175,6 +183,85 @@ describe("diagnostics tool scheduling", () => {
       expect(Date.now() - started).toBeLessThan(250);
       expect(result.details.files).toHaveLength(4);
       expect(result.details.files.every((file: any) => file.state === "timed_out" || file.state === "unconfirmed")).toBe(true);
+    } finally { await manager.shutdown(); }
+  });
+
+  it("checks every chunk instead of letting the first one consume the whole deadline", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-diagnostic-chunk-share-"));
+    await writeFile(join(root, "tsconfig.json"), "{}");
+    // Sorted discovery puts the silent file in the first chunk, so the later chunks are exactly the
+    // ones a first-come-first-served budget would starve.
+    const files = [join(root, "a-silent.ts"), join(root, "b.ts"), join(root, "c.ts"), join(root, "d.ts")];
+    await Promise.all(files.map((path) => writeFile(path, "const value = 1;\n")));
+    const pushOnly = { ...fakeServer({ FAKE_LSP_NO_PULL: "1", FAKE_LSP_PUSH: "1", FAKE_LSP_SILENT_URI_SUFFIX: "a-silent.ts" }), id: "push-only" };
+    const base = defaultConfig();
+    const config = { ...base, limits: { ...base.limits, maxOpenDocuments: 2 }, servers: { "push-only": pushOnly } };
+    const loaded = { config, generation: 1, userPath: join(root, "user.json"), warnings: [], trusted: true, authorized: true };
+    const manager = new ClientManager(loaded);
+    const runtime: SessionRuntime = { cwd: root, boundary: root, loaded, registry: new ServerRegistry(config.servers), roots: new RootDetector(1), manager, diagnostics: new DiagnosticService(), changed: new Set(), previewActions: new Set(), previewRenames: new Set() };
+    try {
+      const started = Date.now();
+      const result = await toolFor(runtime).execute("call", { paths: files, mode: "paths", waitMs: 800 }, undefined, undefined, { cwd: root });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      const byPath = new Map(result.details.files.map((file: any) => [file.path, file.state]));
+      expect(byPath.get("a-silent.ts")).toMatch(/^(timed_out|unconfirmed)$/);
+      // The silent file gets its share and no more; the remaining chunks are still collected.
+      expect([byPath.get("b.ts"), byPath.get("c.ts"), byPath.get("d.ts")]).toEqual(["clean", "clean", "clean"]);
+    } finally { await manager.shutdown(); }
+  });
+
+  it("leaves a slow-starting server warm when the deadline expires during acquisition", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-diagnostic-slow-start-"));
+    await writeFile(join(root, "tsconfig.json"), "{}");
+    const path = join(root, "a.ts");
+    await writeFile(path, "const value = 1;\n");
+    const slow = { ...fakeServer({ FAKE_LSP_NO_PULL: "1", FAKE_LSP_PUSH: "1", FAKE_LSP_INIT_DELAY_MS: "400" }), id: "slow" };
+    const config = { ...defaultConfig(), servers: { slow } };
+    const loaded = { config, generation: 1, userPath: join(root, "user.json"), warnings: [], trusted: true, authorized: true };
+    const manager = new ClientManager(loaded);
+    const runtime: SessionRuntime = { cwd: root, boundary: root, loaded, registry: new ServerRegistry(config.servers), roots: new RootDetector(1), manager, diagnostics: new DiagnosticService(), changed: new Set(), previewActions: new Set(), previewRenames: new Set() };
+    const tool = toolFor(runtime);
+    try {
+      const first = await tool.execute("call", { paths: [path], mode: "paths", waitMs: 120 }, undefined, undefined, { cwd: root });
+      expect(first.details.status).toBe("timed_out");
+      expect(first.details.files[0].state).toBe("timed_out");
+      // Giving up on the wait must not terminate the server that was still initializing, or the
+      // retry below would pay for another cold start and time out exactly the same way.
+      await waitUntil(() => manager.status().some((client) => client.state === "ready"));
+      const second = await tool.execute("call", { paths: [path], mode: "paths", waitMs: 120 }, undefined, undefined, { cwd: root });
+      expect(second.details.status).toBe("ok");
+      expect(second.details.files[0].state).toBe("clean");
+    } finally { await manager.shutdown(); }
+  });
+
+  it("leaves eviction headroom so a concurrent sync survives a push batch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "base-lsp-diagnostic-headroom-"));
+    await writeFile(join(root, "tsconfig.json"), "{}");
+    const swept = [join(root, "a.ts"), join(root, "b.ts"), join(root, "c.ts")];
+    const bystander = join(root, "z.ts");
+    await Promise.all([...swept, bystander].map((path) => writeFile(path, "const value = 1;\n")));
+    const pushOnly = { ...fakeServer({ FAKE_LSP_NO_PULL: "1" }), id: "push-only" };
+    const base = defaultConfig();
+    const config = { ...base, limits: { ...base.limits, maxOpenDocuments: 3 }, servers: { "push-only": pushOnly } };
+    const loaded = { config, generation: 1, userPath: join(root, "user.json"), warnings: [], trusted: true, authorized: true };
+    const manager = new ClientManager(loaded);
+    const runtime: SessionRuntime = { cwd: root, boundary: root, loaded, registry: new ServerRegistry(config.servers), roots: new RootDetector(1), manager, diagnostics: new DiagnosticService(), changed: new Set(), previewActions: new Set(), previewRenames: new Set() };
+    try {
+      const sweep = toolFor(runtime).execute("call", { paths: swept, mode: "paths", waitMs: 1_500 }, undefined, undefined, { cwd: root });
+      await waitUntil(() => manager.getActiveClients().length > 0);
+      const client = manager.getActiveClients()[0]!;
+      // Let the batch open its chunk and settle into the collection wait before competing with it.
+      await waitUntil(() => client.status().openDocuments >= 2);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // A batch that pins the entire document budget leaves nothing evictable, so this call parks in
+      // the store's eviction wait until the sweep releases its pins. The reserved headroom is what
+      // lets it through immediately instead of inheriting the sweep's latency.
+      const started = Date.now();
+      const snapshot = await client.documents!.sync(bystander);
+      expect(Date.now() - started).toBeLessThan(400);
+      expect(snapshot.canonicalPath).toBe(bystander);
+      const result = await sweep;
+      expect(result.details.files).toHaveLength(3);
     } finally { await manager.shutdown(); }
   });
 

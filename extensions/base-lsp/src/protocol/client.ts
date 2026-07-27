@@ -30,6 +30,7 @@ export class LspClient {
   private shutdownPromise?: Promise<void>;
   private readonly diagnosticListeners = new Set<(params: PublishDiagnosticsParams) => void>();
   private readonly diagnosticRefreshListeners = new Set<() => void>();
+  private readonly documentChangeListeners = new Set<(path: string) => void>();
   private readonly stopListeners = new Set<() => void>();
   private stoppedEmitted = false;
 
@@ -71,7 +72,7 @@ export class LspClient {
       if (result.serverInfo) this.serverInfo = result.serverInfo;
       await this.notify("initialized", {});
       if (this.server.settings !== undefined) await this.notify("workspace/didChangeConfiguration", { settings: this.server.settings });
-      this.documents = new DocumentStore(this.server, this.capabilities, (method, params) => this.notify(method, params), this.limits.maxOpenDocuments, this.limits.maxFileBytes);
+      this.documents = new DocumentStore(this.server, this.capabilities, (method, params) => this.notify(method, params), this.limits.maxOpenDocuments, this.limits.maxFileBytes, (path) => { for (const listener of this.documentChangeListeners) listener(path); });
       this.state = "ready";
       this.lastUse = Date.now();
     } catch (error) {
@@ -98,6 +99,8 @@ export class LspClient {
 
   onDiagnostics(listener: (params: PublishDiagnosticsParams) => void): () => void { this.diagnosticListeners.add(listener); return () => this.diagnosticListeners.delete(listener); }
   onDiagnosticRefresh(listener: () => void): () => void { this.diagnosticRefreshListeners.add(listener); return () => this.diagnosticRefreshListeners.delete(listener); }
+  /** Fires when a document is synchronized with content this server has not seen before. */
+  onDocumentChanged(listener: (path: string) => void): () => void { this.documentChangeListeners.add(listener); return () => this.documentChangeListeners.delete(listener); }
   /**
    * Fires once. A listener registered after the client has already stopped is invoked immediately:
    * the stop it was waiting for has happened, and a listener parked in the cleared set would never

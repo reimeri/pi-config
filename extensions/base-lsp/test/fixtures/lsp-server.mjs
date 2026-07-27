@@ -65,6 +65,7 @@ async function resultFor(method, params) {
   switch (method) {
     case "initialize":
       if (process.env.FAKE_LSP_MALFORMED === "1") { process.stdout.write("Content-Length: 999999999\r\n\r\n"); return new Promise(() => {}); }
+      if (process.env.FAKE_LSP_INIT_DELAY_MS) await new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_LSP_INIT_DELAY_MS)));
       return { capabilities: {
         positionEncoding: process.env.FAKE_LSP_ENCODING ?? "utf-16",
         textDocumentSync: { openClose: true, change: 2, save: { includeText: true } },

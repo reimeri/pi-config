@@ -33,7 +33,13 @@ export class DocumentStore {
    * snapshot. Restarting at version 1 after an LRU close would break that invariant.
    */
   private readonly versionFloor = new Map<string, number>();
-  constructor(private readonly server: ServerDefinition, private readonly capabilities: NormalizedCapabilities, private readonly notify: Notify, private readonly maxOpen: number, private readonly maxFileBytes: number) {}
+  /**
+   * Content last handed to the server per path, retained across close/reopen so that reopening an
+   * untouched document is not mistaken for an edit. Consumers that cache cross-file results need to
+   * know when the server's view of the workspace actually changed, which an LRU reopen does not.
+   */
+  private readonly syncedHashes = new Map<string, string>();
+  constructor(private readonly server: ServerDefinition, private readonly capabilities: NormalizedCapabilities, private readonly notify: Notify, private readonly maxOpen: number, private readonly maxFileBytes: number, private readonly onContentChanged: (path: string) => void = () => undefined) {}
 
   list(): OpenDocument[] { return [...this.documents.values()].map((document) => ({ ...document })); }
   get(path: string): OpenDocument | undefined { const document = this.documents.get(path); return document ? { ...document } : undefined; }
@@ -112,6 +118,7 @@ export class DocumentStore {
         try { if (this.capabilities.openClose) await this.notify("textDocument/didOpen", { textDocument: { uri, languageId, version: openVersion, text } }); }
         catch (error) { this.documents.delete(path); throw error; }
       });
+      this.recordSynced(path, hash);
       return { ...document, syncState: "opened" };
     }
     const version = existing.version + 1;
@@ -121,7 +128,18 @@ export class DocumentStore {
     await this.notify("textDocument/didChange", { textDocument: { uri, version }, contentChanges });
     this.versionFloor.set(path, version);
     Object.assign(existing, { version, contentHash: hash, text, mtimeMs: info.mtimeMs, lastUse: Date.now() });
+    this.recordSynced(path, hash);
     return { ...existing, syncState: "changed" };
+  }
+  /**
+   * Announce content the server has not seen before. A first sync is not announced: the server has
+   * no prior view of that path to invalidate, and treating every cold open as an edit would discard
+   * cached cross-file results on each LRU reopen during a sweep.
+   */
+  private recordSynced(path: string, hash: string): void {
+    const previous = this.syncedHashes.get(path);
+    this.syncedHashes.set(path, hash);
+    if (previous !== undefined && previous !== hash) this.onContentChanged(path);
   }
   private async notifySave(document: OpenDocument): Promise<void> {
     if (!this.capabilities.save) return;

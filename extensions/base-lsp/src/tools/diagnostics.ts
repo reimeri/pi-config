@@ -51,7 +51,7 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
         const operationSignal = signal ? AbortSignal.any([signal, deadlineController.signal]) : deadlineController.signal;
         let groupResults: GroupDiagnosticResult[];
         try {
-          groupResults = await mapConcurrent(groups, concurrency, (group) => runDiagnosticGroup(runtime, group, mode, deadlineAt, params.refresh ?? false, operationSignal));
+          groupResults = await mapConcurrent(groups, concurrency, (group) => runDiagnosticGroup(runtime, group, mode, deadlineAt, params.refresh ?? false, operationSignal, signal));
         } finally { clearTimeout(deadlineTimer); }
         const rawEvidence = groupResults.flatMap((result) => result.evidence);
         const serverRuns = groupResults.map((result) => result.run);
@@ -140,7 +140,7 @@ export function registerDiagnosticsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
   });
 }
 
-async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mode: string, deadlineAt: number, refresh: boolean, signal?: AbortSignal): Promise<GroupDiagnosticResult> {
+async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mode: string, deadlineAt: number, refresh: boolean, signal?: AbortSignal, acquireSignal?: AbortSignal): Promise<GroupDiagnosticResult> {
   const started = Date.now();
   const evidence: RawEvidence[] = [];
   let omittedWorkspaceReports = 0;
@@ -148,7 +148,7 @@ async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mod
   const remainingMs = (): number => Math.max(0, deadlineAt - Date.now());
   try {
     if (remainingMs() <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed before server acquisition");
-    const acquired = await runtime.manager.acquire(group.route, signal);
+    const acquired = await acquireWithinDeadline(runtime, group.route, remainingMs(), acquireSignal);
     client = acquired;
     runtime.diagnostics.observe(acquired);
     if (remainingMs() <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed during server acquisition");
@@ -165,13 +165,14 @@ async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mod
         }
       });
     } else if (!acquired.capabilities?.diagnostics.pull) {
-      const chunkSize = Math.max(1, runtime.loaded.config.limits.maxOpenDocuments);
+      const chunkSize = pushChunkSize(runtime.loaded.config.limits.maxOpenDocuments);
       for (let offset = 0; offset < group.items.length; offset += chunkSize) {
         const chunk = group.items.slice(offset, offset + chunkSize);
         if (remainingMs() <= 0) throw new TimeoutError("Shared diagnostic deadline elapsed before the push-diagnostic batch completed");
+        const chunkDeadlineAt = Date.now() + chunkBudgetMs(remainingMs(), group.items.length - offset, chunkSize);
         const checkpoint = runtime.diagnostics.checkpoint(acquired);
         await acquired.documents!.withSynchronizedDocuments(chunk.map((item) => item.file), signal, async (snapshots) => {
-          const results = await runtime.diagnostics.checkPushBatch(acquired, snapshots, deadlineAt, refresh, signal, checkpoint);
+          const results = await runtime.diagnostics.checkPushBatch(acquired, snapshots, chunkDeadlineAt, refresh, signal, checkpoint);
           const byPath = new Map(snapshots.map((snapshot) => [snapshot.canonicalPath, snapshot] as const));
           for (const item of chunk) {
             const snapshot = byPath.get(item.file)!;
@@ -197,6 +198,49 @@ async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mod
     for (const item of group.items) if (!completed.has(item.file)) evidence.push({ item, result: { state, diagnostics: [], message } });
     return { evidence, run: { server: group.route.server.id, root: group.route.root, status: groupEvidenceStatus(evidence.map((entry) => entry.result.state)), durationMs: Date.now() - started }, omittedWorkspaceReports };
   } finally { if (client) runtime.manager.release(client); }
+}
+
+/**
+ * The shared deadline bounds how long this tool blocks, not how long a language server is allowed
+ * to start. Aborting the acquisition would drop the manager's last waiter, which force-terminates a
+ * server that is still initializing, so a cold start slower than `waitMs` could never converge:
+ * every retry would kill the process it was waiting for. Instead the acquisition keeps running on
+ * the caller's own cancellation signal and is released in the background, leaving a warm client
+ * behind for the next call while this one reports its files as timed out.
+ */
+async function acquireWithinDeadline(runtime: SessionRuntime, route: Route, budgetMs: number, signal?: AbortSignal): Promise<LspClient> {
+  const acquisition = runtime.manager.acquire(route, signal);
+  let expire!: (error: Error) => void;
+  const deadline = new Promise<never>((_, reject) => { expire = reject; });
+  const timer = setTimeout(() => expire(new TimeoutError("Shared diagnostic deadline elapsed during server acquisition")), budgetMs);
+  timer.unref?.();
+  try {
+    return await Promise.race([acquisition, deadline]);
+  } catch (error) {
+    acquisition.then((client) => runtime.manager.release(client)).catch(() => undefined);
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * A push batch pins every document it opens for the whole collection wait, so a chunk sized to the
+ * entire document budget leaves nothing evictable and any concurrent operation on the same client
+ * parks in the store's eviction wait until it fails. Reserve a slice of the budget for those
+ * callers. Default limits are chosen so a default-sized sweep still fits in a single chunk.
+ */
+export function pushChunkSize(maxOpenDocuments: number): number {
+  const reserve = Math.min(16, Math.max(1, Math.ceil(maxOpenDocuments / 10)));
+  return Math.max(1, maxOpenDocuments - reserve);
+}
+
+/**
+ * Each chunk receives an equal share of what is left of the call deadline, so one slow chunk cannot
+ * consume the whole budget and leave later chunks unopened and unchecked. A chunk that settles
+ * early hands its unused share back to the next one, and a group that fits in a single chunk still
+ * receives the entire remaining deadline.
+ */
+export function chunkBudgetMs(remainingMs: number, itemsLeft: number, chunkSize: number): number {
+  return Math.max(1, Math.floor(remainingMs / Math.max(1, Math.ceil(itemsLeft / chunkSize))));
 }
 
 async function mapConcurrent<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {

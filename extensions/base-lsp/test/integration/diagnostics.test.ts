@@ -159,6 +159,43 @@ describe("truthful diagnostics", () => {
     } finally { await client.shutdown(); }
   });
 
+  it("drops confirmed evidence when a dependency reaches the server with new content", async () => {
+    const { root, path } = await fixture("const ERROR = 1;\n");
+    const dependency = join(root, "dependency.ts");
+    await writeFile(dependency, "export const value = 1;\n");
+    const executeLog = join(root, "execute.log");
+    const client = await fakeClient(root, {
+      FAKE_LSP_NO_PULL: "1",
+      FAKE_LSP_TS_REQUEST: "1",
+      FAKE_LSP_SERVER_NAME: "typescript-language-server",
+      FAKE_LSP_EXECUTE_LOG: executeLog,
+    }, { id: "typescript", diagnosticPolicy: { pushFirstMs: 10_000, settleMs: 5, acceptUnversionedEmptyAfterOpen: true } });
+    const service = new DiagnosticService();
+    const requestCount = async (): Promise<number> => (await readFile(executeLog, "utf8")).trim().split("\n").filter(Boolean).length;
+    try {
+      await client.start(); service.observe(client);
+      await client.documents!.sync(dependency);
+      const snapshot = await client.documents!.sync(path);
+      await service.checkPushBatch(client, [snapshot], Date.now() + 1_000, true, undefined, service.checkpoint(client));
+      expect(await requestCount()).toBe(3);
+
+      // Reopening an untouched document is not an edit: the cache must survive an LRU cycle.
+      await client.documents!.close(path);
+      const reopened = await client.documents!.sync(path);
+      const cached = (await service.checkPushBatch(client, [reopened], Date.now() + 1_000, false, undefined, service.checkpoint(client))).get(reopened.uri)!;
+      expect(cached).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
+      expect(await requestCount()).toBe(3);
+
+      // Changing another file can change this one's diagnostics, so the cached answer is void even
+      // though this file's own content is untouched.
+      await writeFile(dependency, "export const value = \"two\";\n");
+      await client.documents!.sync(dependency);
+      const rechecked = (await service.checkPushBatch(client, [reopened], Date.now() + 1_000, false, undefined, service.checkpoint(client))).get(reopened.uri)!;
+      expect(rechecked).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
+      expect(await requestCount()).toBe(6);
+    } finally { await client.shutdown(); }
+  });
+
   it("preserves completed TypeScript evidence when another file consumes the shared deadline", async () => {
     const { root, path } = await fixture("const ERROR = 1;\n");
     const second = join(root, "second.ts"); const hung = join(root, "hung.ts");

@@ -326,12 +326,20 @@ export class DiagnosticService {
       for (const waiter of waiters.get(params.uri) ?? []) waiter(bounded);
     });
     const disposeRefresh = client.onDiagnosticRefresh(() => this.invalidate(client));
+    /**
+     * Confirmed evidence is keyed by a file's own content, but servers with inter-file dependencies
+     * derive a file's diagnostics from its imports too. Once any document reaches the server with
+     * new content, every cached result for this client may describe a workspace that no longer
+     * exists, so the whole confirmed cache goes. Retained publications and pull result ids survive:
+     * both carry their own version or result id and are validated against the snapshot on use.
+     */
+    const disposeChanges = client.onDocumentChanged(() => confirmed.clear());
     let disposed = false;
     let disposeStop: (() => void) | undefined;
     const state: ClientDiagnosticState = { pushes, waiters, reports, confirmed, sequence: 0, dispose: () => {
       if (disposed) return;
       disposed = true;
-      disposeDiagnostics(); disposeRefresh(); disposeStop?.();
+      disposeDiagnostics(); disposeRefresh(); disposeChanges(); disposeStop?.();
       pushes.clear(); waiters.clear(); reports.clear(); confirmed.clear();
       this.clients.delete(client); this.states.delete(state);
     } };
