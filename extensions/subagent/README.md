@@ -13,8 +13,8 @@ Current user agents:
 
 | Agent | Model | Thinking | Tools |
 |---|---|---|---|
-| `scout` | `openai-codex/gpt-5.6-luna` | `medium` | `read, grep, find, ls` |
-| `reviewer` | `openai-codex/gpt-5.6-sol` | `high` | `read, grep, find, ls, bash` |
+| `scout` | `openai-codex/gpt-5.6-luna` | `medium` | `read, grep, find, ls, lsp_navigation` |
+| `reviewer` | `openai-codex/gpt-5.6-sol` | `medium` | `read, grep, find, ls, bash, lsp_navigation, lsp_diagnostics` |
 
 The reviewer prompt restricts `bash` to read-only Git commands. This is an instruction, not an OS-level sandbox.
 

@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Code review specialist for quality and security analysis
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls, bash, lsp_navigation, lsp_diagnostics
 model: openai-codex/gpt-5.6-sol
 thinking: medium
 ---
