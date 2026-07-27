@@ -27,6 +27,61 @@ describe("bounded protocol reader", () => {
     stream.write(frames); await new Promise((resolve) => setImmediate(resolve));
     expect(messages).toHaveLength(25); expect(errors).toEqual([]);
   });
+
+  it("rejects a header that never terminates", async () => {
+    const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 256, maxBodyBytes: 1024 });
+    const errors: Error[] = []; reader.onError((error) => errors.push(error)); reader.listen(() => undefined);
+    stream.write("Content-Length: 10\r\n".repeat(40)); await new Promise((resolve) => setImmediate(resolve));
+    expect(errors[0]?.message).toMatch(/header limit/);
+  });
+
+  it("reassembles a separator split across a chunk boundary", async () => {
+    const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 256, maxBodyBytes: 1024 });
+    const messages: any[] = []; const errors: Error[] = [];
+    reader.onError((error) => errors.push(error)); reader.listen((message) => messages.push(message));
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 7, result: "ok" });
+    const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    // Cut between the two CRLF pairs, the one place a naive scan can lose the frame boundary.
+    const cut = frame.indexOf("\r\n\r\n") + 2;
+    stream.write(frame.slice(0, cut)); stream.write(frame.slice(cut));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(errors).toEqual([]); expect(messages).toEqual([{ jsonrpc: "2.0", id: 7, result: "ok" }]);
+  });
+
+  it("reclaims space across a long run of frames rather than growing without bound", async () => {
+    // Each frame is a sizeable fraction of the reader's working buffer, so consuming them has to
+    // slide the remainder down; a reader that only ever appended would balloon instead.
+    const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 1024, maxBodyBytes: 128 * 1024 });
+    const messages: any[] = []; const errors: Error[] = [];
+    reader.onError((error) => errors.push(error)); reader.listen((message) => messages.push(message));
+    for (let id = 0; id < 200; id += 1) {
+      const body = JSON.stringify({ jsonrpc: "2.0", id, result: { pad: "é".repeat(3_000) } });
+      const frame = Buffer.from(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`, "utf8");
+      for (let offset = 0; offset < frame.length; offset += 997) stream.write(frame.subarray(offset, offset + 997));
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(errors).toEqual([]);
+    expect(messages.map((message) => message.id)).toEqual(Array.from({ length: 200 }, (_, index) => index));
+    expect(messages[199].result.pad).toBe("é".repeat(3_000));
+  });
+
+  it("accumulates a large body in linear time", async () => {
+    // Concatenating the whole retained buffer per chunk cost ~576ms for this input; the copying is
+    // now amortised to one pass over the bytes received.
+    const payload = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { data: "x".repeat(8 * 1024 * 1024) } });
+    const frame = Buffer.from(`Content-Length: ${Buffer.byteLength(payload)}\r\n\r\n${payload}`, "utf8");
+    const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 64 * 1024, maxBodyBytes: 64 * 1024 * 1024 });
+    const errors: Error[] = []; let received: any;
+    reader.onError((error) => errors.push(error));
+    const settled = new Promise<void>((resolve) => reader.listen((message) => { received = message; resolve(); }));
+    const started = performance.now();
+    for (let offset = 0; offset < frame.length; offset += 8 * 1024) stream.write(frame.subarray(offset, offset + 8 * 1024));
+    await settled;
+    const elapsed = performance.now() - started;
+    expect(errors).toEqual([]);
+    expect(received.result.data).toHaveLength(8 * 1024 * 1024);
+    expect(elapsed).toBeLessThan(150);
+  });
 });
 
 describe("workspace edits", () => {
