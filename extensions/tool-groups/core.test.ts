@@ -50,9 +50,14 @@ const isTool = (value: unknown): value is ToolLike =>
 const isSeparator = (value: unknown): boolean =>
 	value instanceof FakeComponent && value.kind === "separator";
 
-function controller(enabled = true, prefix = "group"): GroupRenderController {
+function controller(
+	enabled = true,
+	prefix = "group",
+	minimumGroupSize: 1 | 2 = 2,
+): GroupRenderController {
 	return {
 		isEnabled: () => enabled,
+		minimumGroupSize: () => minimumGroupSize,
 		isTool,
 		isIgnorableSeparator: isSeparator,
 		renderGroup: (tools) => [`${prefix}:${tools.map((item) => item.toolName).join(",")}`],
@@ -74,6 +79,32 @@ describe("buildGroupPlans", () => {
 		expect(plans).toHaveLength(1);
 		expect(plans[0]?.tools.map((item) => item.toolName)).toEqual(["read", "bash", "grep"]);
 		expect(plans[0]).toMatchObject({ start: 0, end: 6 });
+	});
+
+	test("includes one-tool runs when the minimum group size is one", () => {
+		const children = [
+			tool("read"),
+			new FakeComponent("answer", "visible"),
+			tool("bash"),
+		];
+
+		const plans = buildGroupPlans(children, isTool, isSeparator, 1);
+		expect(plans).toHaveLength(2);
+		expect(plans[0]).toMatchObject({ start: 0, end: 1 });
+		expect(plans[0]?.tools.map((item) => item.toolName)).toEqual(["read"]);
+		expect(plans[1]).toMatchObject({ start: 2, end: 3 });
+		expect(plans[1]?.tools.map((item) => item.toolName)).toEqual(["bash"]);
+	});
+
+	test("does not consume separators after a one-tool run", () => {
+		const children = [
+			tool("read"),
+			new FakeComponent("", "separator"),
+			new FakeComponent("answer", "visible"),
+		];
+
+		const [plan] = buildGroupPlans(children, isTool, isSeparator, 1);
+		expect(plan).toMatchObject({ start: 0, end: 1 });
 	});
 
 	test("visible content breaks a run", () => {
@@ -133,6 +164,17 @@ describe("renderContainerWithGroups", () => {
 		const lines = renderContainerWithGroups(container, 80, originalRender, controller());
 		expect(lines).toEqual(["before", "group:read,bash", "after"]);
 		expect(container.children).toEqual(children);
+	});
+
+	test("renders a one-tool run when the controller includes singles", () => {
+		const container = new FakeContainer([
+			new FakeComponent("before", "visible"),
+			tool("read"),
+			new FakeComponent("after", "visible"),
+		]);
+
+		expect(renderContainerWithGroups(container, 80, originalRender, controller(true, "group", 1)))
+			.toEqual(["before", "group:read", "after"]);
 	});
 
 	test("falls back byte-for-byte when disabled or when no run exists", () => {

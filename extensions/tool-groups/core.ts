@@ -23,6 +23,7 @@ export type OriginalContainerRender = (this: ContainerLike, width: number) => st
 
 export interface GroupRenderController {
 	isEnabled(): boolean;
+	minimumGroupSize(): 1 | 2;
 	isTool(component: unknown): component is ToolLike;
 	isIgnorableSeparator(component: unknown): boolean;
 	renderGroup(tools: ToolLike[], width: number): string[];
@@ -44,6 +45,7 @@ export function buildGroupPlans(
 	children: readonly unknown[],
 	isTool: GroupRenderController["isTool"],
 	isIgnorableSeparator: GroupRenderController["isIgnorableSeparator"],
+	minimumGroupSize: 1 | 2 = 2,
 ): GroupPlan[] {
 	const plans: GroupPlan[] = [];
 	let index = 0;
@@ -74,7 +76,7 @@ export function buildGroupPlans(
 			end = cursor;
 		}
 
-		if (tools.length >= 2) {
+		if (tools.length >= minimumGroupSize) {
 			plans.push({ start: index, end, tools });
 			index = end;
 		} else {
@@ -91,7 +93,7 @@ export function renderContainerWithGroups(
 	originalRender: OriginalContainerRender,
 	controller: GroupRenderController,
 ): string[] {
-	if (!controller.isEnabled() || !Array.isArray(container.children) || container.children.length < 2) {
+	if (!controller.isEnabled() || !Array.isArray(container.children) || container.children.length === 0) {
 		return originalRender.call(container, width);
 	}
 
@@ -99,6 +101,7 @@ export function renderContainerWithGroups(
 		container.children,
 		controller.isTool,
 		controller.isIgnorableSeparator,
+		controller.minimumGroupSize(),
 	);
 	if (plans.length === 0) return originalRender.call(container, width);
 

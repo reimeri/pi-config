@@ -26,11 +26,13 @@ import {
 } from "./core.ts";
 
 const PATCH_KEY = Symbol.for("pi-global-tool-groups:container-render-v1");
-const CONFIG_VERSION = 1;
+const CONFIG_VERSION = 2;
+
+type ToolGroupingMode = "off" | "consecutive" | "all";
 
 interface ToolGroupsConfig {
 	version: typeof CONFIG_VERSION;
-	enabled: boolean;
+	mode: ToolGroupingMode;
 }
 
 interface LoadedConfig {
@@ -44,21 +46,40 @@ function configPath(): string {
 }
 
 function defaultConfig(): ToolGroupsConfig {
-	return { version: CONFIG_VERSION, enabled: true };
+	return { version: CONFIG_VERSION, mode: "consecutive" };
+}
+
+function isGroupingMode(value: unknown): value is ToolGroupingMode {
+	return value === "off" || value === "consecutive" || value === "all";
 }
 
 function loadConfig(): LoadedConfig {
 	const path = configPath();
 	if (!existsSync(path)) return { config: defaultConfig() };
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<ToolGroupsConfig>;
-		if (parsed.version !== CONFIG_VERSION || typeof parsed.enabled !== "boolean") {
-			return {
-				config: defaultConfig(),
-				warning: `Ignoring invalid tool-group config at ${path}`,
-			};
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+		if (parsed.version === CONFIG_VERSION && isGroupingMode(parsed.mode)) {
+			return { config: { version: CONFIG_VERSION, mode: parsed.mode } };
 		}
-		return { config: { version: CONFIG_VERSION, enabled: parsed.enabled } };
+		if (parsed.version === 1 && typeof parsed.enabled === "boolean") {
+			const config: ToolGroupsConfig = {
+				version: CONFIG_VERSION,
+				mode: parsed.enabled ? "consecutive" : "off",
+			};
+			try {
+				saveConfig(config);
+				return { config };
+			} catch (error) {
+				return {
+					config,
+					warning: `Could not migrate tool-group config at ${path}: ${error instanceof Error ? error.message : String(error)}`,
+				};
+			}
+		}
+		return {
+			config: defaultConfig(),
+			warning: `Ignoring invalid tool-group config at ${path}`,
+		};
 	} catch (error) {
 		return {
 			config: defaultConfig(),
@@ -197,13 +218,14 @@ function renderCollapsedGroup(tools: ToolLike[], width: number, theme: Theme): s
 }
 
 export default function toolGroupsExtension(pi: ExtensionAPI) {
-	let enabled = loadConfig().config.enabled;
+	let mode = loadConfig().config.mode;
 	let active = false;
 	let activeTheme: (() => Theme) | undefined;
 	let patchState: ContainerRenderPatchState | undefined;
 
 	const controller: GroupRenderController = {
-		isEnabled: () => active && enabled && activeTheme !== undefined,
+		isEnabled: () => active && mode !== "off" && activeTheme !== undefined,
+		minimumGroupSize: () => mode === "all" ? 1 : 2,
 		isTool: isToolComponent,
 		isIgnorableSeparator,
 		renderGroup(tools, width) {
@@ -219,29 +241,36 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("tool-groups", {
-		description: "Control compact grouping of consecutive tool calls",
+		description: "Set tool grouping to consecutive, all (including singles), or off",
 		getArgumentCompletions(prefix) {
-			return ["on", "off", "toggle", "status"]
+			return ["consecutive", "all", "off", "status", "on", "toggle"]
 				.filter((value) => value.startsWith(prefix.trim().toLowerCase()))
 				.map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
-			const mode = args.trim().toLowerCase() || "status";
-			if (mode === "status") {
-				ctx.ui.notify(`Tool grouping: ${enabled ? "on" : "off"}`, "info");
-				return;
-			}
-			if (mode !== "on" && mode !== "off" && mode !== "toggle") {
-				ctx.ui.notify("Usage: /tool-groups on|off|toggle|status", "error");
+			const command = args.trim().toLowerCase() || "status";
+			if (command === "status") {
+				ctx.ui.notify(`Tool grouping: ${mode}`, "info");
 				return;
 			}
 
-			const nextEnabled = mode === "toggle" ? !enabled : mode === "on";
+			let nextMode: ToolGroupingMode;
+			if (isGroupingMode(command)) nextMode = command;
+			else if (command === "on") nextMode = "consecutive";
+			else if (command === "toggle") nextMode = mode === "off" ? "consecutive" : "off";
+			else {
+				ctx.ui.notify(
+					"Usage: /tool-groups consecutive|all|off|status (aliases: on, toggle)",
+					"error",
+				);
+				return;
+			}
+
 			try {
-				saveConfig({ version: CONFIG_VERSION, enabled: nextEnabled });
-				enabled = nextEnabled;
+				saveConfig({ version: CONFIG_VERSION, mode: nextMode });
+				mode = nextMode;
 				ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-				ctx.ui.notify(`Tool grouping: ${enabled ? "on" : "off"}`, "info");
+				ctx.ui.notify(`Tool grouping: ${mode}`, "info");
 			} catch (error) {
 				ctx.ui.notify(
 					`Could not save tool-group setting: ${error instanceof Error ? error.message : String(error)}`,
@@ -253,7 +282,7 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		const loaded = loadConfig();
-		enabled = loaded.config.enabled;
+		mode = loaded.config.mode;
 		if (ctx.mode !== "tui") return;
 
 		active = true;

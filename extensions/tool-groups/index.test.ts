@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -94,7 +94,7 @@ afterEach(() => {
 });
 
 describe("tool-groups extension", () => {
-	test("groups dynamically, persists across reload, and detaches cleanly", async () => {
+	test("switches grouping modes, persists all mode, migrates legacy config, and detaches cleanly", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-tool-groups-test-"));
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		const notices: string[] = [];
@@ -129,6 +129,9 @@ describe("tool-groups extension", () => {
 		} as any);
 		root.addChild(bashTool as any);
 
+		const singleRoot = new Container();
+		singleRoot.addChild(fakeTool("read", { path: "/tmp/single.ts" }) as any);
+
 		try {
 			const first = await loadGeneration();
 			await first.start?.({}, ctx);
@@ -137,6 +140,7 @@ describe("tool-groups extension", () => {
 			expect(grouped).toContain("Read /tmp/a.ts");
 			expect(grouped).toContain("Bash printf ok");
 			expect(grouped).not.toContain("FULL:read");
+			expect(singleRoot.render(100)).toEqual(["FULL:read"]);
 			expect(root.render(0)).toEqual([]);
 
 			readTool.expanded = true;
@@ -147,22 +151,55 @@ describe("tool-groups extension", () => {
 			readTool.expanded = false;
 			bashTool.expanded = false;
 
-			await first.command.handler("off", ctx);
-			expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
+			await first.command.handler("all", ctx);
+			const groupedSingle = singleRoot.render(100).join("\n");
+			expect(groupedSingle).toContain("Read × 1");
+			expect(groupedSingle).toContain("Read /tmp/single.ts");
+			expect(groupedSingle).not.toContain("FULL:read");
 			expect(JSON.parse(readFileSync(join(agentDir, "tool-groups.json"), "utf8"))).toEqual({
-				version: 1,
-				enabled: false,
+				version: 2,
+				mode: "all",
 			});
 
 			// Match Pi's real reload order: old shutdown, new module load, new start.
 			await first.shutdown?.({ reason: "reload" }, ctx);
 			const second = await loadGeneration();
 			await second.start?.({ reason: "reload" }, ctx);
+			expect(singleRoot.render(100).join("\n")).toContain("Read × 1");
+			await second.command.handler("status", ctx);
+			expect(notices.at(-1)).toBe("Tool grouping: all");
+
+			await second.command.handler("consecutive", ctx);
+			expect(singleRoot.render(100)).toEqual(["FULL:read"]);
+			expect(root.render(100).join("\n")).toContain("Tools × 2");
+
+			await second.command.handler("toggle", ctx);
 			expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
 
-			await second.command.handler("on", ctx);
+			await second.command.handler("toggle", ctx);
 			expect(root.render(100).join("\n")).toContain("Tools × 2");
-			expect(notices.at(-1)).toBe("Tool grouping: on");
+			expect(singleRoot.render(100)).toEqual(["FULL:read"]);
+			expect(notices.at(-1)).toBe("Tool grouping: consecutive");
+
+			await second.shutdown?.({ reason: "reload" }, ctx);
+			writeFileSync(
+				join(agentDir, "tool-groups.json"),
+				`${JSON.stringify({ version: 1, enabled: false }, null, 2)}\n`,
+			);
+			const third = await loadGeneration();
+			await third.start?.({ reason: "reload" }, ctx);
+			expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
+			expect(JSON.parse(readFileSync(join(agentDir, "tool-groups.json"), "utf8"))).toEqual({
+				version: 2,
+				mode: "off",
+			});
+
+			await third.command.handler("on", ctx);
+			expect(root.render(100).join("\n")).toContain("Tools × 2");
+			expect(JSON.parse(readFileSync(join(agentDir, "tool-groups.json"), "utf8"))).toEqual({
+				version: 2,
+				mode: "consecutive",
+			});
 		} finally {
 			for (const shutdown of shutdowns.reverse()) await shutdown({}, ctx);
 			rmSync(agentDir, { recursive: true, force: true });
