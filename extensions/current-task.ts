@@ -66,7 +66,7 @@ function editorTopBar(
 	width: number,
 	border: (text: string) => string,
 	accent: (text: string) => string,
-	warning: (text: string) => string,
+	modeColor: (text: string) => string,
 ): string {
 	if (width <= 0) return "";
 	if (width === 1) return border("─");
@@ -85,7 +85,7 @@ function editorTopBar(
 		border("─"),
 		taskText ? accent(taskText) : "",
 		border("─".repeat(fillWidth)),
-		modeText ? warning(modeText) : "",
+		modeText ? modeColor(modeText) : "",
 		border("─"),
 	].join("");
 }
@@ -126,7 +126,7 @@ class CurrentTaskEditor extends CustomEditor {
 			width,
 			activeBorderColor,
 			this.accent,
-			this.warning,
+			activeBorderColor,
 		);
 		return lines;
 	}
