@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { formatToolModeStatus, ToolModeCoordinator } from "./coordinator.ts";
+import { formatToolModeChange, ToolModeCoordinator } from "./coordinator.ts";
 import toolModeCoordinatorExtension from "./index.ts";
 import { setToolMode, type ToolModeDefinition } from "./protocol.ts";
 
@@ -102,15 +102,20 @@ function setupToolModeExtension(toolNames: string[]): {
 	tools: FakeTools;
 	events: FakeEventBus;
 	handlers: Map<string, Handler[]>;
+	sent: Array<{ customType: string; content: string; display?: boolean }>;
 } {
 	const tools = new FakeTools(toolNames);
 	const events = new FakeEventBus();
 	const handlers = new Map<string, Handler[]>();
+	const sent: Array<{ customType: string; content: string; display?: boolean }> = [];
 	const pi = {
 		events,
 		getActiveTools: () => tools.getActiveTools(),
 		setActiveTools: (names: string[]) => tools.setActiveTools(names),
 		appendEntry: () => "state-entry",
+		sendMessage: (message: { customType: string; content: string; display?: boolean }) => {
+			sent.push(message);
+		},
 		on: (eventName: string, handler: Handler) => {
 			const registered = handlers.get(eventName) ?? [];
 			registered.push(handler);
@@ -118,50 +123,39 @@ function setupToolModeExtension(toolNames: string[]): {
 		},
 	} as unknown as ExtensionAPI;
 	toolModeCoordinatorExtension(pi);
-	return { pi, tools, events, handlers };
+	return { pi, tools, events, handlers, sent };
+}
+
+/** Runs the reconcile that establishes the session's starting modes silently. */
+async function startSession(handlers: Map<string, Handler[]>): Promise<void> {
+	await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "unchanged" });
 }
 
 describe("tool-mode extension context integration", () => {
-	test("replaces stale status on every model turn after plan mode is turned off", async () => {
+	test("leaves the model context untouched while still enforcing the active policy", async () => {
 		const baseline = ["read", "bash", "edit", "write", "todo_update"];
-		const { pi, handlers } = setupToolModeExtension(baseline);
-		const beforeAgentStart = handlers.get("before_agent_start")?.[0];
+		const { pi, tools, handlers, sent } = setupToolModeExtension(baseline);
 		const context = handlers.get("context")?.[0];
-		expect(beforeAgentStart).toBeDefined();
 		expect(context).toBeDefined();
 
+		await startSession(handlers);
 		await setToolMode(pi.events, planMode, true);
-		expect(await beforeAgentStart?.({ systemPrompt: "unchanged" })).toBeUndefined();
-		const activeResult = await context?.({ messages: [] });
-		const activeStatus = activeResult.messages.find(
-			(message: any) => message.customType === "tool-mode-current-state",
-		);
-		expect(activeStatus.content).toContain("Active restrictive modes: plan");
 
-		await setToolMode(pi.events, planMode, false);
-		const staleAssistant = {
-			role: "assistant",
-			content: [{ type: "text", text: "Plan mode is still active." }],
-		};
-		const disabledResult = await context?.({
-			messages: [...activeResult.messages, staleAssistant],
-		});
-		const currentStatuses = disabledResult.messages.filter(
-			(message: any) => message.customType === "tool-mode-current-state",
-		);
+		// Simulate another extension activating a tool the active policy forbids.
+		tools.setActiveTools([...tools.getActiveTools(), "write"]);
+		const messages = [{ role: "assistant", content: [{ type: "text", text: "hi" }] }];
 
-		expect(currentStatuses).toHaveLength(1);
-		expect(currentStatuses[0].content).toContain("Active restrictive modes: none");
-		expect(currentStatuses[0].content).toContain(
-			"Active tools: read, bash, edit, write, todo_update",
-		);
-		expect(disabledResult.messages).toContain(staleAssistant);
+		expect(await context?.({ messages })).toBeUndefined();
+		expect(tools.getActiveTools()).toEqual(["read", "bash"]);
+		// The enforcement path must never send a message mid-request.
+		expect(sent).toHaveLength(0);
 	});
 
 	test("reasserts a locally reported fail-closed mode over a coordinated policy", async () => {
 		const baseline = ["read", "bash", "edit", "write", "todo_update"];
 		const quarantineTools = ["read", "grep", "find", "ls"];
 		const { pi, tools, events, handlers } = setupToolModeExtension(baseline);
+		await startSession(handlers);
 		await setToolMode(pi.events, planMode, true);
 
 		// Simulate quarantine's direct fallback after its coordinated activation failed.
@@ -170,43 +164,90 @@ describe("tool-mode extension context integration", () => {
 			data.report("quarantine", quarantineTools);
 		});
 
-		const beforeAgentStart = handlers.get("before_agent_start")?.[0];
 		const context = handlers.get("context")?.[0];
-		expect(await beforeAgentStart?.({ systemPrompt: "unchanged" })).toBeUndefined();
+		expect(await context?.({ messages: [] })).toBeUndefined();
 		expect(tools.getActiveTools()).toEqual(quarantineTools);
-
-		const result = await context?.({ messages: [] });
-		const status = result.messages.find(
-			(message: any) => message.customType === "tool-mode-current-state",
-		);
-
-		expect(tools.getActiveTools()).toEqual(quarantineTools);
-		expect(status.content).toContain("Active restrictive modes: plan, quarantine");
-		expect(status.content).toContain("Active tools: read, grep, find, ls");
 	});
 });
 
-describe("formatToolModeStatus", () => {
-	test("makes an unrestricted restored state authoritative to the model", () => {
-		const status = formatToolModeStatus({
-			activeModeIds: [],
-			activeTools: ["read", "bash", "edit", "write", "todo_update"],
-		});
+describe("tool-mode change announcements", () => {
+	test("records the session's starting modes without announcing them", async () => {
+		const { handlers, sent } = setupToolModeExtension(["read", "bash", "edit"]);
 
-		expect(status).toContain("[CURRENT TOOL MODE STATE]");
-		expect(status).toContain("Active restrictive modes: none");
-		expect(status).toContain("Active tools: read, bash, edit, write, todo_update");
-		expect(status).toContain("Ignore earlier conversation claims");
+		await startSession(handlers);
+
+		// A resumed branch already carries the message that enabled the mode.
+		expect(sent).toHaveLength(0);
 	});
 
-	test("reports composed restrictions without promising unavailable mutation tools", () => {
-		const status = formatToolModeStatus({
-			activeModeIds: ["plan", "quarantine"],
-			activeTools: ["read", "grep", "find", "ls"],
+	test("announces a transition once, not on every turn", async () => {
+		const baseline = ["read", "bash", "edit", "write", "todo_update"];
+		const { pi, handlers, sent } = setupToolModeExtension(baseline);
+		const turnEnd = handlers.get("turn_end")?.[0];
+		await startSession(handlers);
+
+		await setToolMode(pi.events, planMode, true);
+		await turnEnd?.({});
+		expect(sent).toHaveLength(1);
+		expect(sent[0].customType).toBe("tool-mode-change");
+		expect(sent[0].display).toBe(false);
+		expect(sent[0].content).toContain("Active restrictive modes: plan");
+
+		// Unchanged state across later turns must stay silent.
+		await turnEnd?.({});
+		await startSession(handlers);
+		expect(sent).toHaveLength(1);
+	});
+
+	test("announces the return to an unrestricted state", async () => {
+		const baseline = ["read", "bash", "edit", "write", "todo_update"];
+		const { pi, handlers, sent } = setupToolModeExtension(baseline);
+		const turnEnd = handlers.get("turn_end")?.[0];
+		await startSession(handlers);
+
+		await setToolMode(pi.events, planMode, true);
+		await turnEnd?.({});
+		await setToolMode(pi.events, planMode, false);
+		await turnEnd?.({});
+
+		expect(sent).toHaveLength(2);
+		expect(sent[1].content).toContain("Active restrictive modes: none");
+	});
+
+	test("announces a locally reported fail-closed mode the coordinator does not know about", async () => {
+		const quarantineTools = ["read", "grep", "find", "ls"];
+		const { events, handlers, sent } = setupToolModeExtension(["read", "bash", "edit"]);
+		await startSession(handlers);
+
+		events.on("tool-modes:local-status", (data) => {
+			data.report("quarantine", quarantineTools);
 		});
+		await handlers.get("turn_end")?.[0]?.({});
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0].content).toContain("Active restrictive modes: quarantine");
+	});
+});
+
+describe("formatToolModeChange", () => {
+	test("supersedes earlier conversation claims when restrictions are lifted", () => {
+		const status = formatToolModeChange({ activeModeIds: [] });
+
+		expect(status).toContain("[TOOL MODE CHANGE]");
+		expect(status).toContain("Active restrictive modes: none");
+		expect(status).toContain("supersedes every earlier claim");
+	});
+
+	test("reports composed restrictions", () => {
+		const status = formatToolModeChange({ activeModeIds: ["plan", "quarantine"] });
 
 		expect(status).toContain("Active restrictive modes: plan, quarantine");
-		expect(status).toContain("Active tools: read, grep, find, ls");
-		expect(status).not.toContain("edit");
+	});
+
+	test("omits the tool list the request already carries twice", () => {
+		const status = formatToolModeChange({ activeModeIds: ["quarantine"] });
+
+		expect(status).not.toContain("Active tools:");
+		expect(status.length).toBeLessThan(400);
 	});
 });

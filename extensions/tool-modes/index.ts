@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { formatToolModeStatus, ToolModeCoordinator } from "./coordinator.ts";
+import { formatToolModeChange, ToolModeCoordinator } from "./coordinator.ts";
 import {
 	TOOL_MODE_REQUEST_EVENT,
 	TOOL_MODE_STATE_ENTRY_TYPE,
@@ -9,6 +9,8 @@ import {
 	type ToolModeRequest,
 	type ToolModeResult,
 } from "./protocol.ts";
+
+const TOOL_MODE_CHANGE_MESSAGE_TYPE = "tool-mode-change";
 
 function isOptionalToolNameArray(value: unknown): boolean {
 	return (
@@ -69,8 +71,31 @@ function isToolModeRequest(value: unknown): value is ToolModeRequest {
 
 export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 	const coordinator = new ToolModeCoordinator(pi);
+	// Sorted, joined mode ids as last announced to the model; undefined until the
+	// first reconcile of the session. That first reconcile only records the
+	// starting modes, so a resumed session does not re-announce a restriction its
+	// own branch history already records.
+	let announcedModeIds: string | undefined;
 
-	function reconcileWithLocalFailClosedModes(): ToolModeResult {
+	function announceModeChange(activeModeIds: string[]): void {
+		const signature = [...activeModeIds].sort().join(",");
+		const establishingBaseline = announcedModeIds === undefined;
+		if (!establishingBaseline && signature === announcedModeIds) return;
+		announcedModeIds = signature;
+		if (establishingBaseline) return;
+
+		pi.sendMessage({
+			customType: TOOL_MODE_CHANGE_MESSAGE_TYPE,
+			content: formatToolModeChange({ activeModeIds }),
+			display: false,
+		});
+	}
+
+	// `announce` is off on the per-request enforcement path: sending a message
+	// while a request is being assembled would land it in an arbitrary position.
+	// The turn boundaries below always run before the next model call, so a change
+	// is still recorded before the model can act on stale history.
+	function reconcileWithLocalFailClosedModes(options: { announce?: boolean } = {}): ToolModeResult {
 		const localReports = locallyActiveToolModeReports(pi.events);
 		const toolsBeforeReconcile = pi.getActiveTools();
 		const result = coordinator.reconcile();
@@ -89,11 +114,13 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 			}
 			pi.setActiveTools(failClosedTools);
 		}
+		const activeModeIds = [
+			...new Set([...result.activeModeIds, ...localReports.map((report) => report.modeId)]),
+		];
+		if (options.announce) announceModeChange(activeModeIds);
 		return {
 			...result,
-			activeModeIds: [
-				...new Set([...result.activeModeIds, ...localReports.map((report) => report.modeId)]),
-			],
+			activeModeIds,
 			activeTools: pi.getActiveTools(),
 		};
 	}
@@ -140,29 +167,16 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 	// Reassert active policies around every model turn so tools dynamically
 	// activated by another extension cannot escape a restrictive mode.
 	pi.on("before_agent_start", () => {
-		reconcileWithLocalFailClosedModes();
+		reconcileWithLocalFailClosedModes({ announce: true });
 	});
-	pi.on("context", (event) => {
-		const state = reconcileWithLocalFailClosedModes();
-		const status = formatToolModeStatus(state);
-		return {
-			messages: [
-				...event.messages.filter(
-					(message) =>
-						message.role !== "custom" || message.customType !== "tool-mode-current-state",
-				),
-				{
-					role: "custom" as const,
-					customType: "tool-mode-current-state",
-					content: status,
-					display: false,
-					timestamp: Date.now(),
-				},
-			],
-		};
+	// Enforcement only. The model learns the active tool set from the request's
+	// tool definitions and the system prompt's tool list, both rebuilt whenever
+	// the active set changes, so there is nothing to inject here.
+	pi.on("context", () => {
+		reconcileWithLocalFailClosedModes();
 	});
 	pi.on("turn_end", () => {
-		reconcileWithLocalFailClosedModes();
+		reconcileWithLocalFailClosedModes({ announce: true });
 	});
 
 	// A replacement session inherits the process-wide active tool set. Restore

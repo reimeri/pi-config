@@ -16,15 +16,16 @@ export interface ToolModeCoordinatorSnapshot {
 	activeTools: string[];
 }
 
-export function formatToolModeStatus(
-	state: Pick<ToolModeResult, "activeModeIds" | "activeTools">,
-): string {
+// Recorded once per transition rather than restated every turn, so it stays in a
+// stable, cacheable position in the history. The active tool list is deliberately
+// omitted: every request already carries the authoritative set twice, as the tool
+// definitions and as the system prompt's tool list. What neither of those can say
+// is *why* a tool is missing, which is the only reason this message exists.
+export function formatToolModeChange(state: Pick<ToolModeResult, "activeModeIds">): string {
 	const activeModes = state.activeModeIds.length > 0 ? state.activeModeIds.join(", ") : "none";
-	const activeTools = state.activeTools.length > 0 ? state.activeTools.join(", ") : "none";
-	return `[CURRENT TOOL MODE STATE]
-This state is authoritative for the current model turn. Ignore earlier conversation claims about which tool modes or tools are active.
-Active restrictive modes: ${activeModes}
-Active tools: ${activeTools}`;
+	return `[TOOL MODE CHANGE]
+Tool modes changed at this point in the conversation. This supersedes every earlier claim about which tool modes or tools are active; the tool definitions sent with each request are the complete list of what you can call.
+Active restrictive modes: ${activeModes}`;
 }
 
 export class ToolModeCoordinator {
