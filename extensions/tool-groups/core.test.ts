@@ -188,6 +188,29 @@ describe("renderContainerWithGroups", () => {
 		expect(renderContainerWithGroups(container, 80, originalRender, controller(false))).toEqual(expected);
 		expect(renderContainerWithGroups(container, 80, originalRender, controller(true))).toEqual(expected);
 	});
+
+	test("renders every child of a declined run, separators included", () => {
+		const container = new FakeContainer([
+			new FakeComponent("before", "visible"),
+			tool("read"),
+			new FakeComponent("", "separator"),
+			tool("bash"),
+			new FakeComponent("after", "visible"),
+			tool("grep"),
+			tool("find"),
+		]);
+		const declining: GroupRenderController = { ...controller(), renderGroup: () => undefined };
+
+		expect(renderContainerWithGroups(container, 80, originalRender, declining))
+			.toEqual(originalRender.call(container, 80));
+		expect(
+			renderContainerWithGroups(container, 80, originalRender, {
+				...controller(),
+				renderGroup: (tools) =>
+					tools[0]?.toolName === "read" ? undefined : [`group:${tools.map((item) => item.toolName).join(",")}`],
+			}),
+		).toEqual(["before", "read", "", "bash", "after", "group:grep,find"]);
+	});
 });
 
 describe("reload-safe prototype adapter", () => {

@@ -126,16 +126,6 @@ function isIgnorableSeparator(value: unknown): boolean {
 	);
 }
 
-function stripAnsi(value: string): string {
-	return value
-		.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
-function isBlankRenderedLine(value: string): boolean {
-	return stripAnsi(value).trim().length === 0;
-}
-
 function statusDot(status: ToolStatus, theme: Theme): string {
 	if (status === "failed") return theme.fg("error", "●");
 	if (status === "done") return theme.fg("thinkingLow", "●");
@@ -171,10 +161,10 @@ function statusCounts(tools: ToolLike[], theme: Theme): string {
 	return parts.join(theme.fg("dim", " · "));
 }
 
-function formatHeader(tools: ToolLike[], expanded: boolean, width: number, theme: Theme): string {
+function formatHeader(tools: ToolLike[], width: number, theme: Theme): string {
 	const label = theme.fg("toolTitle", theme.bold(groupLabel(tools)));
 	const counts = statusCounts(tools, theme);
-	const hint = keyHint("app.tools.expand", expanded ? "to collapse" : "to expand");
+	const hint = keyHint("app.tools.expand", "to expand");
 	return truncateToWidth(
 		` ${statusDot(aggregateStatus(tools), theme)} ${label} ${theme.fg("dim", "—")} ${counts} ${theme.fg("dim", "·")} ${hint}`,
 		Math.max(1, width),
@@ -196,23 +186,10 @@ function formatCompactTool(tool: ToolLike, index: number, total: number, width: 
 	);
 }
 
-function renderExpandedGroup(tools: ToolLike[], width: number, theme: Theme): string[] {
-	const lines = ["", formatHeader(tools, true, width, theme)];
-	for (const tool of tools) {
-		const rendered = tool.render(width);
-		let start = 0;
-		while (start < rendered.length && isBlankRenderedLine(rendered[start]!)) start++;
-		if (start < rendered.length) {
-			lines.push("", ...rendered.slice(start));
-		}
-	}
-	return lines;
-}
-
 function renderCollapsedGroup(tools: ToolLike[], width: number, theme: Theme): string[] {
 	return [
 		"",
-		formatHeader(tools, false, width, theme),
+		formatHeader(tools, width, theme),
 		...tools.map((tool, index) => formatCompactTool(tool, index, tools.length, width, theme)),
 	];
 }
@@ -230,13 +207,13 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 		isIgnorableSeparator,
 		renderGroup(tools, width) {
 			if (!Number.isFinite(width) || width <= 0) return [];
-			const safeWidth = Math.floor(width);
 			const theme = activeTheme?.();
-			if (!theme) return tools.flatMap((tool) => tool.render(safeWidth));
-			const expanded = tools.some((tool) => tool.expanded === true);
-			return expanded
-				? renderExpandedGroup(tools, safeWidth, theme)
-				: renderCollapsedGroup(tools, safeWidth, theme);
+			if (!theme) return undefined;
+			// An expanded group puts its header a screenful or more above the viewport, so
+			// every status change inside it rewrites a line Pi cannot reach with a
+			// differential update, costing a full clear-and-repaint of the transcript.
+			if (tools.some((tool) => tool.expanded === true)) return undefined;
+			return renderCollapsedGroup(tools, Math.floor(width), theme);
 		},
 	};
 

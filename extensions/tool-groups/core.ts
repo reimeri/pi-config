@@ -26,7 +26,8 @@ export interface GroupRenderController {
 	minimumGroupSize(): 1 | 2;
 	isTool(component: unknown): component is ToolLike;
 	isIgnorableSeparator(component: unknown): boolean;
-	renderGroup(tools: ToolLike[], width: number): string[];
+	/** Undefined declines the run, which then renders as if it were never grouped. */
+	renderGroup(tools: ToolLike[], width: number): string[] | undefined;
 }
 
 export interface GroupPlan {
@@ -112,10 +113,13 @@ export function renderContainerWithGroups(
 	while (childIndex < container.children.length) {
 		const plan = plans[planIndex];
 		if (plan && childIndex === plan.start) {
-			lines.push(...controller.renderGroup(plan.tools, width));
-			childIndex = plan.end;
 			planIndex++;
-			continue;
+			const grouped = controller.renderGroup(plan.tools, width);
+			if (grouped) {
+				lines.push(...grouped);
+				childIndex = plan.end;
+				continue;
+			}
 		}
 
 		lines.push(...container.children[childIndex]!.render(width));

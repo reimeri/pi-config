@@ -152,13 +152,14 @@ describe("tool-groups extension", () => {
 			expect(singleRoot.render(100)).toEqual(["FULL:read"]);
 			expect(root.render(0)).toEqual([]);
 
+			// Exact equality, not a substring: a header above expanded output costs a full
+			// clear-and-repaint on every status change, so nothing may be added at all.
 			readTool.expanded = true;
 			bashTool.expanded = true;
-			const expanded = root.render(100).join("\n");
-			expect(expanded).toContain("FULL:read");
-			expect(expanded).toContain("FULL:bash");
+			expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
 			readTool.expanded = false;
 			bashTool.expanded = false;
+			expect(root.render(100).join("\n")).toContain("Tools × 2");
 
 			await first.command.handler("all", ctx);
 			const groupedSingle = singleRoot.render(100).join("\n");
