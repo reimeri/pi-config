@@ -28,6 +28,8 @@ class FakeEventBus {
 
 class FakeTools {
 	private activeTools: string[];
+	/** Every call rebuilds the system prompt in pi, so counting them matters. */
+	applyCount = 0;
 
 	constructor(toolNames: string[]) {
 		this.activeTools = [...toolNames];
@@ -38,6 +40,7 @@ class FakeTools {
 	}
 
 	setActiveTools(toolNames: string[]): void {
+		this.applyCount++;
 		this.activeTools = [...new Set(toolNames)];
 	}
 }
@@ -78,6 +81,50 @@ describe("ToolModeCoordinator", () => {
 		expect(disabled.activeModeIds).toEqual([]);
 		expect(disabled.baselineTools).toEqual(baseline);
 		expect(tools.getActiveTools()).toEqual(baseline);
+	});
+
+	test("ignores a policy that reorders the tools it was given", () => {
+		const baseline = ["read", "bash", "edit"];
+		const { coordinator, tools } = coordinatorWithTools(baseline);
+		const reorderingMode: ToolModeDefinition = {
+			id: "reorder",
+			priority: 5,
+			apply: (toolNames) => [...toolNames].reverse(),
+		};
+
+		coordinator.setMode(reorderingMode, true);
+
+		// Same members in a new order would rewrite the tool definitions and the
+		// system prompt for a change the model cannot observe.
+		expect(tools.getActiveTools()).toEqual(baseline);
+		expect(tools.applyCount).toBe(0);
+	});
+
+	test("does not reapply an unchanged policy on repeated reconciles", () => {
+		const baseline = ["read", "bash", "edit", "write", "todo_update"];
+		const { coordinator, tools } = coordinatorWithTools(baseline);
+
+		coordinator.setMode(planMode, true);
+		const afterEnable = tools.applyCount;
+		expect(afterEnable).toBe(1);
+
+		// reconcile() runs before every model call while a mode is active.
+		coordinator.reconcile();
+		coordinator.reconcile();
+		coordinator.reconcile();
+
+		expect(tools.applyCount).toBe(afterEnable);
+		expect(tools.getActiveTools()).toEqual(["read", "bash"]);
+	});
+
+	test("still applies a genuine membership change", () => {
+		const baseline = ["read", "bash", "edit"];
+		const { coordinator, tools } = coordinatorWithTools(baseline);
+
+		coordinator.setMode(quarantineMode, true);
+
+		expect(tools.applyCount).toBe(1);
+		expect(tools.getActiveTools()).toEqual(["read", "grep", "find", "ls"]);
 	});
 
 	test("keeps the remaining restrictive policy active until the last mode is disabled", () => {

@@ -10,6 +10,12 @@ function uniqueToolNames(toolNames: string[]): string[] {
 	return [...new Set(toolNames)];
 }
 
+function sameToolSet(left: readonly string[], right: readonly string[]): boolean {
+	const target = new Set(right);
+	const source = new Set(left);
+	return source.size === target.size && [...source].every((name) => target.has(name));
+}
+
 export interface ToolModeCoordinatorSnapshot {
 	activeModes: Map<string, ToolModeDefinition>;
 	baselineTools?: string[];
@@ -166,7 +172,10 @@ export class ToolModeCoordinator {
 		toolNames: string[],
 	): Pick<ToolModeResult, "status" | "activeTools" | "unavailableTools"> {
 		const requestedTools = uniqueToolNames(toolNames);
-		this.pi.setActiveTools(requestedTools);
+		// Use set for tools so tool order does not invalidate cache
+		if (!sameToolSet(requestedTools, this.pi.getActiveTools())) {
+			this.pi.setActiveTools(requestedTools);
+		}
 		const activeTools = this.pi.getActiveTools();
 		const active = new Set(activeTools);
 		return {
