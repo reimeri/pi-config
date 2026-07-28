@@ -209,3 +209,36 @@ export function extractPlanSteps(message: string): PlanStep[] {
 	appendCurrentStep();
 	return items;
 }
+
+/**
+ * Plan-mode instructions, appended to the system prompt for as long as the mode is
+ * on. Deliberately not a per-turn message: a message injected on every turn and
+ * filtered back out on the next one moves the prompt's divergence point forward
+ * each turn, which re-bills the whole conversation. The system prompt changes only
+ * when the mode itself does, so the cost is one invalidation per toggle.
+ */
+export function planModeInstructions(canAskUser: boolean): string {
+	const clarificationGuidance = canAskUser
+		? "Ask clarifying questions using the ask_user tool."
+		: "If material ambiguities remain, report them instead of assuming answers.";
+
+	return `[PLAN MODE ACTIVE]
+You are in plan mode - a read-only exploration mode for safe code analysis.
+
+Restrictions:
+- Built-in edit and write tools are disabled
+- Other currently active tools remain available
+- Bash is restricted to an allowlist of read-only commands
+
+${clarificationGuidance}
+Use brave-search skill via bash for web research.
+
+Create a detailed numbered plan under a "Plan:" header:
+
+Plan:
+1. First step description
+2. Second step description
+...
+
+Do NOT attempt to make changes - just describe what you would do.`;
+}

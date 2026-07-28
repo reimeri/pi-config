@@ -141,40 +141,68 @@ async function createPlanModeHarness() {
 }
 
 describe("plan-mode context", () => {
-	test("keeps only the latest persistent plan-mode context while enabled", async () => {
+	const base = { systemPrompt: "BASE PROMPT" };
+
+	test("carries plan context in the system prompt, not a per-turn message", async () => {
 		const harness = await createPlanModeHarness();
 		const { commands, handlers, ctx } = harness;
+
+		expect(await handlers.get("before_agent_start")?.[0]?.(base, ctx)).toBeUndefined();
+
 		await commands.get("plan")?.handler("", ctx);
 		expect(harness.getActiveTools()).toContain("ask_user");
 
-		const beforeAgentStart = await handlers.get("before_agent_start")?.[0]?.({}, ctx);
-		expect(beforeAgentStart.message.content).toContain("ask_user");
+		const enabled = await handlers.get("before_agent_start")?.[0]?.(base, ctx);
+		expect(enabled.message).toBeUndefined();
+		expect(enabled.systemPrompt).toContain("BASE PROMPT");
+		expect(enabled.systemPrompt).toContain("[PLAN MODE ACTIVE]");
+		expect(enabled.systemPrompt).toContain("ask_user");
 
+		// Byte-identical across turns: this is what keeps the cached prefix intact.
+		const nextTurn = await handlers.get("before_agent_start")?.[0]?.(base, ctx);
+		expect(nextTurn.systemPrompt).toBe(enabled.systemPrompt);
+
+		await commands.get("plan")?.handler("", ctx);
+		expect(await handlers.get("before_agent_start")?.[0]?.(base, ctx)).toBeUndefined();
+	});
+
+	test("filters legacy plan-mode messages the same way regardless of mode", async () => {
+		const harness = await createPlanModeHarness();
+		const { commands, handlers, ctx } = harness;
 		const contextHandler = handlers.get("context")?.[0];
+
 		const first = { role: "custom", customType: "plan-mode-context", content: "first" };
 		const user = { role: "user", content: "question" };
 		const latest = { role: "custom", customType: "plan-mode-context", content: "latest" };
-		const result = await contextHandler?.({ messages: [first, user, latest] }, ctx);
+		const messages = [first, user, latest];
 
-		expect(result.messages).toEqual([user, latest]);
+		const disabled = await contextHandler?.({ messages }, ctx);
+		expect(disabled.messages).toEqual([user]);
 
 		await commands.get("plan")?.handler("", ctx);
-		const disabledResult = await contextHandler?.({ messages: [first, user, latest] }, ctx);
-		expect(disabledResult.messages).toEqual([user]);
+		const enabled = await contextHandler?.({ messages }, ctx);
+
+		// Same output on and off, so toggling cannot move the divergence point.
+		expect(enabled.messages).toEqual(disabled.messages);
+	});
+
+	test("drops the ask_user guidance when the tool is unavailable", async () => {
+		const harness = await createPlanModeHarness();
+		const { commands, handlers, ctx } = harness;
 
 		const headlessCtx = { ...ctx, hasUI: false };
 		harness.setActiveTools(["read", "ask_user"]);
 		await commands.get("plan")?.handler("", headlessCtx);
 		expect(harness.getActiveTools()).not.toContain("ask_user");
-		const headlessPrompt = await handlers.get("before_agent_start")?.[0]?.({}, headlessCtx);
-		expect(headlessPrompt.message.content).not.toContain("using the ask_user tool");
+		const headless = await handlers.get("before_agent_start")?.[0]?.(base, headlessCtx);
+		expect(headless.systemPrompt).not.toContain("using the ask_user tool");
 
 		await commands.get("plan")?.handler("", headlessCtx);
 		harness.setAllTools([]);
 		await commands.get("plan")?.handler("", ctx);
 		expect(harness.getActiveTools()).not.toContain("ask_user");
-		const unavailablePrompt = await handlers.get("before_agent_start")?.[0]?.({}, ctx);
-		expect(unavailablePrompt.message.content).not.toContain("using the ask_user tool");
+		const unavailable = await handlers.get("before_agent_start")?.[0]?.(base, ctx);
+		expect(unavailable.systemPrompt).not.toContain("using the ask_user tool");
 	});
 });
 

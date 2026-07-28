@@ -32,7 +32,7 @@ import {
 	type ToolModeDefinition,
 } from "../tool-modes/protocol.ts";
 import { MAX_TODOS, requestTodosFromPlan } from "../todos/protocol.ts";
-import { extractPlanSteps, isSafeCommand } from "./utils.ts";
+import { extractPlanSteps, isSafeCommand, planModeInstructions } from "./utils.ts";
 
 // Tools
 const TODO_TOOL_NAME = "todo_update";
@@ -188,17 +188,16 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		}
 	});
 
-	// Filter stale context from the previous progress-tracking implementation.
+	// Strip context left by earlier plan-mode implementations, which carried these
+	// instructions as messages. Nothing here reads the current mode: the filter has
+	// to return the same messages on every turn, or it moves the prompt's
+	// divergence point and re-bills the conversation behind it.
 	pi.on("context", async (event) => {
-		const latestPlanContextIndex = planModeEnabled
-			? event.messages.findLastIndex(
-					(message) => (message as AgentMessage & { customType?: string }).customType === "plan-mode-context",
-				)
-			: -1;
 		return {
-			messages: event.messages.filter((m, index) => {
+			messages: event.messages.filter((m) => {
 				const msg = m as AgentMessage & { customType?: string };
 				if (
+					msg.customType === "plan-mode-context" ||
 					msg.customType === "plan-execution-context" ||
 					msg.customType === "plan-mode-execute" ||
 					msg.customType === "plan-todo-list" ||
@@ -206,8 +205,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				) {
 					return false;
 				}
-				if (msg.customType === "plan-mode-context") return index === latestPlanContextIndex;
-				if (planModeEnabled) return true;
 				if (msg.role !== "user") return true;
 
 				const content = msg.content;
@@ -224,37 +221,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	// Inject plan context before the agent starts.
-	pi.on("before_agent_start", async () => {
+	// Carry plan context in the system prompt rather than a per-turn message, so it
+	// stays byte-identical for as long as the mode is on.
+	pi.on("before_agent_start", async (event) => {
 		if (!planModeEnabled) return;
-		const clarificationGuidance = planModeCanAskUser
-			? "Ask clarifying questions using the ask_user tool."
-			: "If material ambiguities remain, report them instead of assuming answers.";
-		return {
-			message: {
-				customType: "plan-mode-context",
-				content: `[PLAN MODE ACTIVE]
-You are in plan mode - a read-only exploration mode for safe code analysis.
-
-Restrictions:
-- Built-in edit and write tools are disabled
-- Other currently active tools remain available
-- Bash is restricted to an allowlist of read-only commands
-
-${clarificationGuidance}
-Use brave-search skill via bash for web research.
-
-Create a detailed numbered plan under a "Plan:" header:
-
-Plan:
-1. First step description
-2. Second step description
-...
-
-Do NOT attempt to make changes - just describe what you would do.`,
-				display: false,
-			},
-		};
+		return { systemPrompt: `${event.systemPrompt}\n\n${planModeInstructions(planModeCanAskUser)}` };
 	});
 
 	// Extract a completed plan and offer to execute or refine it.
