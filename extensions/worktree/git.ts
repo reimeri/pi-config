@@ -131,7 +131,9 @@ export async function addWorktree(
 			args = ["worktree", "add", "-b", resolution.branch, "--", path, resolution.startRef];
 			break;
 	}
-	const result = await pi.exec("git", args, { cwd: snapshot.primaryRoot });
+	// Run from the invoking checkout so relative start refs (HEAD, HEAD~1, @{-1}) resolve in the
+	// same worktree that validateStartRef checked them against.
+	const result = await pi.exec("git", args, { cwd: snapshot.currentRoot });
 	return result.code === 0
 		? { ok: true, value: undefined }
 		: { ok: false, error: commandError(result, `Failed to create worktree for ${resolution.branch}`) };

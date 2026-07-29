@@ -86,8 +86,10 @@ function assertNoOverlap(
 		throw new Error(`Worktree root must not overlap Git metadata: ${root}`);
 	}
 	for (const registered of registeredWorktrees) {
-		if (root === registered || isWithin(root, registered)) {
-			throw new Error(`Worktree root must not contain a registered worktree: ${registered}`);
+		// Containing registered worktrees is the whole point of a managed root, so only an
+		// exact collision with an existing worktree is fatal here.
+		if (root === registered) {
+			throw new Error(`Worktree root must not be a registered worktree: ${registered}`);
 		}
 		if (registered !== primary && isWithin(registered, root)) {
 			throw new Error(`Worktree root must not be inside another linked worktree: ${registered}`);
@@ -153,7 +155,10 @@ export function rootExcludePattern(primaryRoot: string, worktreeRoot: string): s
 	if (!target.startsWith(`${root}/`)) return undefined;
 	const relative = target.slice(root.length + 1).split("\\").join("/");
 	if (!relative || relative.startsWith("../")) return undefined;
-	return `/${relative.replace(/^\/+|\/+$/gu, "")}/`;
+	// Gitignore patterns are globs: escape the wildcard syntax so a root whose name contains
+	// it still matches the literal directory.
+	const trimmed = relative.replace(/^\/+|\/+$/gu, "").replace(/[\\[\]*?]/gu, (character) => `\\${character}`);
+	return `/${trimmed}/`;
 }
 
 export function repositoryDisplayName(primaryRoot: string): string {
