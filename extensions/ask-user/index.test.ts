@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
 	runAskUserFlow,
+	type AskUserDialogOptions,
+	type AskUserSelectOption,
 	type AskUserUI,
 	type NormalizedQuestion,
 } from "./flow.ts";
@@ -9,23 +11,40 @@ type SelectAction = string | undefined | ((title: string, options: string[]) => 
 type InputAction = string | undefined;
 
 class FakeUI implements AskUserUI {
-	readonly selectCalls: Array<{ title: string; options: string[] }> = [];
-	readonly inputCalls: Array<{ title: string; placeholder?: string }> = [];
+	readonly selectCalls: Array<{
+		title: string;
+		options: AskUserSelectOption[];
+		cancelLabel: AskUserDialogOptions["cancelLabel"];
+	}> = [];
+	readonly inputCalls: Array<{
+		title: string;
+		placeholder?: string;
+		cancelLabel: AskUserDialogOptions["cancelLabel"];
+	}> = [];
 
 	constructor(
 		private readonly selectActions: SelectAction[],
 		private readonly inputActions: InputAction[] = [],
 	) {}
 
-	async select(title: string, options: string[]): Promise<string | undefined> {
-		this.selectCalls.push({ title, options });
+	async select(
+		title: string,
+		options: AskUserSelectOption[],
+		opts: AskUserDialogOptions,
+	): Promise<string | undefined> {
+		this.selectCalls.push({ title, options, cancelLabel: opts.cancelLabel });
 		if (this.selectActions.length === 0) throw new Error(`Unexpected select: ${title}`);
 		const action = this.selectActions.shift();
-		return typeof action === "function" ? action(title, options) : action;
+		const values = options.map((option) => option.value);
+		return typeof action === "function" ? action(title, values) : action;
 	}
 
-	async input(title: string, placeholder?: string): Promise<string | undefined> {
-		this.inputCalls.push({ title, placeholder });
+	async input(
+		title: string,
+		placeholder: string | undefined,
+		opts: AskUserDialogOptions,
+	): Promise<string | undefined> {
+		this.inputCalls.push({ title, placeholder, cancelLabel: opts.cancelLabel });
 		if (this.inputActions.length === 0) throw new Error(`Unexpected input: ${title}`);
 		return this.inputActions.shift();
 	}
@@ -69,7 +88,8 @@ describe("runAskUserFlow", () => {
 		expect(result.status).toBe("answered");
 		expect(result.answers.map((answer) => answer.answer)).toEqual(["Large", "Careful"]);
 		expect(ui.selectCalls.filter((call) => call.title.includes("Which scope?")).length).toBe(2);
-		expect(ui.selectCalls[1]?.title).toContain("Esc: previous question");
+		expect(ui.selectCalls[1]?.title).not.toContain("[Esc:");
+		expect(ui.selectCalls[1]?.cancelLabel).toBe("back");
 	});
 
 	test("Escape from a custom answer returns to that question's choices", async () => {
@@ -83,7 +103,8 @@ describe("runAskUserFlow", () => {
 
 		expect(result.status).toBe("answered");
 		expect(result.answers[0]?.answer).toBe("Small");
-		expect(ui.inputCalls[0]?.title).toContain("Esc: answer choices");
+		expect(ui.inputCalls[0]?.title).not.toContain("[Esc:");
+		expect(ui.inputCalls[0]?.cancelLabel).toBe("back");
 		expect(ui.selectCalls.filter((call) => call.title.includes("Which scope?")).length).toBe(2);
 	});
 
@@ -100,8 +121,13 @@ describe("runAskUserFlow", () => {
 
 		expect(result.status).toBe("answered");
 		expect(result.answers.map((answer) => answer.answer)).toEqual(["Large", "Fast"]);
-		expect(ui.selectCalls[2]?.options.join("\n")).toContain("current: Small");
-		expect(ui.selectCalls[3]?.title).toContain("Esc: review");
+		expect(ui.selectCalls[2]?.options.map((option) => option.value).join("\n")).toContain("current: Small");
+		expect(ui.selectCalls[3]?.title).not.toContain("[Esc:");
+		expect(ui.selectCalls[3]?.cancelLabel).toBe("back");
+
+		const scopeChoice = ui.selectCalls[2]?.options[1];
+		const mutedRange = scopeChoice?.mutedRanges?.[0];
+		expect(mutedRange && scopeChoice?.value.slice(mutedRange.start, mutedRange.end)).toBe("Which scope?");
 	});
 
 	test("Escape from review returns to the final question", async () => {
@@ -200,11 +226,13 @@ describe("runAskUserFlow", () => {
 	});
 
 	test("Escape on the first question still cancels", async () => {
-		const result = await runAskUserFlow(questions, new FakeUI([undefined]));
+		const ui = new FakeUI([undefined]);
+		const result = await runAskUserFlow(questions, ui);
 
 		expect(result.status).toBe("cancelled");
 		expect(result.stoppedAt).toBe("scope");
 		expect(result.answers).toEqual([]);
+		expect(ui.selectCalls[0]?.cancelLabel).toBe("cancel");
 	});
 
 	test("RPC cancellation stops instead of navigating backward", async () => {
@@ -217,6 +245,7 @@ describe("runAskUserFlow", () => {
 		expect(result.answers.map((answer) => answer.answer)).toEqual(["Small"]);
 		expect(ui.selectCalls).toHaveLength(2);
 		expect(ui.selectCalls[1]?.title).not.toContain("Esc:");
+		expect(ui.selectCalls[1]?.cancelLabel).toBe("cancel");
 	});
 
 	test("RPC cancellation from custom input does not reopen the choices", async () => {
@@ -227,6 +256,7 @@ describe("runAskUserFlow", () => {
 		expect(result.status).toBe("cancelled");
 		expect(ui.selectCalls).toHaveLength(1);
 		expect(ui.inputCalls[0]?.title).not.toContain("Esc:");
+		expect(ui.inputCalls[0]?.cancelLabel).toBe("cancel");
 	});
 
 	test("an aborted dialog is not mistaken for back navigation", async () => {

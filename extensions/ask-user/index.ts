@@ -9,6 +9,7 @@ import {
 	type AskUserStatus,
 	type NormalizedQuestion,
 } from "./flow.ts";
+import { createAskUserUI } from "./tui.ts";
 import { setToolMode, type ToolModeDefinition } from "../tool-modes/protocol.ts";
 
 const OptionSchema = Type.Object({
@@ -144,9 +145,12 @@ export default function askUserExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const details = await runAskUserFlow(questions, ctx.ui, signal, {
-				allowBackNavigation: ctx.mode === "tui",
-			});
+			const details = await runAskUserFlow(
+				questions,
+				createAskUserUI(ctx.ui, ctx.mode === "tui"),
+				signal,
+				{ allowBackNavigation: ctx.mode === "tui" },
+			);
 			if (details.status === "answered") {
 				return {
 					content: [{ type: "text", text: details.answers.map(answerSummary).join("\n") }],

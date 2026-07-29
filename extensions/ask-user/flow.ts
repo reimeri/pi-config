@@ -28,9 +28,31 @@ export interface AskUserDetails {
 	stoppedAt?: string;
 }
 
+export interface AskUserSelectOption {
+	value: string;
+	mutedRanges?: Array<{ start: number; end: number }>;
+}
+
+export interface AskUserDialogOptions {
+	signal?: AbortSignal;
+	cancelLabel: "back" | "cancel";
+}
+
 export interface AskUserUI {
-	select(title: string, options: string[], opts?: { signal?: AbortSignal }): Promise<string | undefined>;
-	input(title: string, placeholder?: string, opts?: { signal?: AbortSignal }): Promise<string | undefined>;
+	select(
+		title: string,
+		options: AskUserSelectOption[],
+		opts: AskUserDialogOptions,
+	): Promise<string | undefined>;
+	input(
+		title: string,
+		placeholder: string | undefined,
+		opts: AskUserDialogOptions,
+	): Promise<string | undefined>;
+}
+
+function selectOption(value: string): AskUserSelectOption {
+	return { value };
 }
 
 function formatChoice(option: QuestionOption, index: number): string {
@@ -82,11 +104,11 @@ async function promptQuestion(
 	signal?: AbortSignal,
 ): Promise<QuestionOutcome> {
 	const position = total > 1 ? ` (${index + 1}/${total})` : "";
-	const backHint = allowBackNavigation ? ` [Esc: ${backDestination}]` : "";
-	const title = `Clarification${position}: ${question.question}${backHint}`;
+	const title = `Clarification${position}: ${question.question}`;
+	const cancelLabel = allowBackNavigation && backDestination !== "cancel" ? "back" : "cancel";
 
 	if (question.options.length === 0) {
-		const custom = await ui.input(title, question.placeholder ?? "Type your answer", { signal });
+		const custom = await ui.input(title, question.placeholder ?? "Type your answer", { signal, cancelLabel });
 		if (custom === undefined) {
 			return { type: signal?.aborted ? "aborted" : allowBackNavigation ? "back" : "cancel" };
 		}
@@ -102,17 +124,17 @@ async function promptQuestion(
 		};
 	}
 
-	const choices = question.options.map(formatChoice);
+	const choices = question.options.map((option, optionIndex) => selectOption(formatChoice(option, optionIndex)));
 	const otherChoice = `${choices.length + 1}. Other — type a custom answer`;
-	if (question.allowOther) choices.push(otherChoice);
+	if (question.allowOther) choices.push(selectOption(otherChoice));
 
 	while (true) {
-		const selected = await ui.select(title, choices, { signal });
+		const selected = await ui.select(title, choices, { signal, cancelLabel });
 		if (selected === undefined) {
 			return { type: signal?.aborted ? "aborted" : allowBackNavigation ? "back" : "cancel" };
 		}
 
-		const selectedIndex = choices.indexOf(selected);
+		const selectedIndex = choices.findIndex((choice) => choice.value === selected);
 		if (selectedIndex >= 0 && selectedIndex < question.options.length) {
 			return {
 				type: "answer",
@@ -128,9 +150,9 @@ async function promptQuestion(
 
 		if (selected !== otherChoice) continue;
 		const custom = await ui.input(
-			`Custom answer${position}: ${question.question}${allowBackNavigation ? " [Esc: answer choices]" : ""}`,
+			`Custom answer${position}: ${question.question}`,
 			question.placeholder ?? "Type your answer",
-			{ signal },
+			{ signal, cancelLabel: allowBackNavigation ? "back" : "cancel" },
 		);
 		if (custom === undefined) {
 			if (signal?.aborted) return { type: "aborted" };
@@ -169,15 +191,20 @@ export async function runAskUserFlow(
 	while (true) {
 		if (screen === "review") {
 			const submitChoice = "1. Submit answers";
-			const editChoices = questions.map((question, index) => {
+			const editChoices = questions.map((question, index): AskUserSelectOption => {
 				const answer = answers.get(question.id);
-				return `${index + 2}. Edit ${index + 1}: ${inlinePreview(question.question)} — current: ${inlinePreview(answer?.answer ?? "")}`;
+				const prefix = `${index + 2}. Edit ${index + 1}: `;
+				const questionPreview = inlinePreview(question.question);
+				const value = `${prefix}${questionPreview} — current: ${inlinePreview(answer?.answer ?? "")}`;
+				return {
+					value,
+					mutedRanges: [{ start: prefix.length, end: prefix.length + questionPreview.length }],
+				};
 			});
-			const reviewBackHint = allowBackNavigation ? " [Esc: final question]" : "";
 			const selected = await ui.select(
-				`Review answers — submit or choose an answer to edit${reviewBackHint}`,
-				[submitChoice, ...editChoices],
-				{ signal },
+				"Review answers — submit or choose an answer to edit",
+				[selectOption(submitChoice), ...editChoices],
+				{ signal, cancelLabel: allowBackNavigation ? "back" : "cancel" },
 			);
 
 			if (selected === undefined) {
@@ -197,7 +224,7 @@ export async function runAskUserFlow(
 				return { questions, answers: orderedAnswers(questions, answers), status: "answered" };
 			}
 
-			const editIndex = editChoices.indexOf(selected);
+			const editIndex = editChoices.findIndex((choice) => choice.value === selected);
 			if (editIndex < 0) continue;
 			questionIndex = editIndex;
 			returnToReview = true;
