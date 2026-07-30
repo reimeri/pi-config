@@ -51,7 +51,7 @@ The model should use `provider/model` syntax. Agent definitions are read fresh f
 - Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }, { "agent": "researcher", "task": "..." }] }`
 - Chain: `{ "chain": [{ "agent": "researcher", "task": "..." }, { "agent": "reviewer", "task": "Review these findings: {previous}" }] }`
 
-Children run as ephemeral JSON-mode Pi processes. The `subagent` tool is explicitly disabled in children to prevent recursive delegation.
+Children run as ephemeral JSON-mode Pi processes. Every invocation starts with fresh context and does not automatically receive the parent conversation or context from prior subagent invocations. Context must be supplied explicitly in the task, including through chain mode's `{previous}` placeholder. Task text must therefore be self-contained. Follow-up tasks should carry forward the relevant prior findings, affected paths or symbols, failure scenarios, expected resolution, and acceptance criteria rather than assuming agent memory; quote prior output when exact details matter. The `subagent` tool is explicitly disabled in children to prevent recursive delegation.
 
 ## Concurrency groups
 

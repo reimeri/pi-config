@@ -507,9 +507,10 @@ export default function (pi: ExtensionAPI) {
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate substantial codebase exploration to the scout agent, independent code review to the reviewer agent, and broader web research to the researcher agent, each with isolated context.",
+			"Delegate substantial codebase exploration to the scout agent, independent code review to the reviewer agent, and broader web research to the researcher agent.",
+			"Every child starts with fresh isolated context and does not automatically receive the parent conversation or context from prior subagent invocations; share context explicitly in the task, including with chain mode's {previous} placeholder.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-			"Give each subagent a focused, self-contained task and verify important findings before making changes.",
+			"Make every task self-contained; for follow-up work, include the relevant prior findings and context instead of assuming the agent remembers them.",
 			`Models, thinking levels, tools, and prompts are configured in agent Markdown files under ${path.join(getAgentDir(), "agents")}.`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
@@ -518,7 +519,9 @@ export default function (pi: ExtensionAPI) {
 			"Use subagent with the scout agent for broad codebase exploration that would consume substantial main-agent context.",
 			"Use subagent with the reviewer agent for an independent review after meaningful code changes.",
 			"Use subagent with the researcher agent for broader web research that benefits from source evaluation and evidence-backed synthesis.",
-			"Give subagent focused, self-contained tasks; do not delegate trivial lookups, and verify consequential findings before editing.",
+			"Every subagent invocation starts with fresh context and does not automatically receive the parent conversation or prior subagent calls; pass needed context explicitly in the task (chain mode may use {previous}) and never assume agent memory.",
+			"Give subagent focused, self-contained tasks with the relevant requirements, paths, symbols, constraints, and acceptance criteria; do not delegate trivial lookups, and verify consequential findings before editing.",
+			"For follow-up tasks, include a concise handoff of the prior findings, affected locations, failure scenarios, and expected resolution; quote prior output when exact details matter rather than referring to 'your previous review'.",
 		],
 		parameters: SubagentParams,
 
