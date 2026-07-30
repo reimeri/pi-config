@@ -6,7 +6,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
+import type { ExtensionAgentContribution } from "./protocol.ts";
+
 export type AgentScope = "user" | "project" | "both";
+export type AgentSource = "user" | "project" | "extension";
 export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const THINKING_LEVELS = new Set<AgentThinkingLevel>([
@@ -25,8 +28,10 @@ export interface AgentConfig {
 	tools?: string[];
 	model?: string;
 	thinking?: AgentThinkingLevel;
+	concurrencyGroup?: string;
 	systemPrompt: string;
-	source: "user" | "project";
+	source: AgentSource;
+	sourceId?: string;
 	filePath: string;
 }
 
@@ -35,57 +40,66 @@ export interface AgentDiscoveryResult {
 	projectAgentsDir: string | null;
 }
 
-function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
-	const agents: AgentConfig[] = [];
+const CONCURRENCY_GROUP_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-	if (!fs.existsSync(dir)) {
-		return agents;
+export function loadAgentFromFile(
+	filePath: string,
+	source: AgentSource,
+	sourceId?: string,
+): AgentConfig | undefined {
+	let content: string;
+	try {
+		content = fs.readFileSync(filePath, "utf-8");
+	} catch {
+		return undefined;
 	}
+
+	const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
+	if (!frontmatter.name || !frontmatter.description) return undefined;
+
+	const tools = frontmatter.tools
+		?.split(",")
+		.map((tool: string) => tool.trim())
+		.filter(Boolean);
+	const configuredThinking = frontmatter.thinking?.trim() as AgentThinkingLevel | undefined;
+	const thinking = configuredThinking && THINKING_LEVELS.has(configuredThinking) ? configuredThinking : undefined;
+	const configuredConcurrencyGroup = frontmatter.concurrency?.trim();
+	const concurrencyGroup =
+		configuredConcurrencyGroup && CONCURRENCY_GROUP_PATTERN.test(configuredConcurrencyGroup)
+			? configuredConcurrencyGroup
+			: undefined;
+
+	return {
+		name: frontmatter.name,
+		description: frontmatter.description,
+		tools: tools && tools.length > 0 ? tools : undefined,
+		model: frontmatter.model?.trim() || undefined,
+		thinking,
+		concurrencyGroup,
+		systemPrompt: body,
+		source,
+		sourceId,
+		filePath,
+	};
+}
+
+function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
+	if (!fs.existsSync(dir)) return [];
 
 	let entries: fs.Dirent[];
 	try {
 		entries = fs.readdirSync(dir, { withFileTypes: true });
 	} catch {
-		return agents;
+		return [];
 	}
 
+	const agents: AgentConfig[] = [];
 	for (const entry of entries) {
 		if (!entry.name.endsWith(".md")) continue;
 		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-
-		const filePath = path.join(dir, entry.name);
-		let content: string;
-		try {
-			content = fs.readFileSync(filePath, "utf-8");
-		} catch {
-			continue;
-		}
-
-		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
-
-		if (!frontmatter.name || !frontmatter.description) {
-			continue;
-		}
-
-		const tools = frontmatter.tools
-			?.split(",")
-			.map((t: string) => t.trim())
-			.filter(Boolean);
-		const configuredThinking = frontmatter.thinking?.trim() as AgentThinkingLevel | undefined;
-		const thinking = configuredThinking && THINKING_LEVELS.has(configuredThinking) ? configuredThinking : undefined;
-
-		agents.push({
-			name: frontmatter.name,
-			description: frontmatter.description,
-			tools: tools && tools.length > 0 ? tools : undefined,
-			model: frontmatter.model?.trim() || undefined,
-			thinking,
-			systemPrompt: body,
-			source,
-			filePath,
-		});
+		const agent = loadAgentFromFile(path.join(dir, entry.name), source);
+		if (agent) agents.push(agent);
 	}
-
 	return agents;
 }
 
@@ -109,7 +123,11 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 	}
 }
 
-export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
+export function discoverAgents(
+	cwd: string,
+	scope: AgentScope,
+	extensionContributions: readonly ExtensionAgentContribution[] = [],
+): AgentDiscoveryResult {
 	const userDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
@@ -125,6 +143,13 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		for (const agent of userAgents) agentMap.set(agent.name, agent);
 	} else {
 		for (const agent of projectAgents) agentMap.set(agent.name, agent);
+	}
+
+	// Trusted extension contributions are invocation-scoped and intentionally win
+	// by name while their provider is active.
+	for (const contribution of extensionContributions) {
+		const agent = loadAgentFromFile(contribution.filePath, "extension", contribution.providerId);
+		if (agent) agentMap.set(agent.name, agent);
 	}
 
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };

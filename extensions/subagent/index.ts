@@ -28,8 +28,15 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { type AgentConfig, type AgentScope, type AgentSource, discoverAgents } from "./agents.ts";
+import { AgentConcurrencyGate, findParallelConcurrencyConflict } from "./concurrency.ts";
 import { LineStream } from "./line-stream.ts";
+import {
+	CHILD_TERMINATION_GRACE_MS,
+	shouldFinishOnChildError,
+	terminateWithEscalation,
+} from "./process-control.ts";
+import { discoverExtensionAgents } from "./protocol.ts";
 import { truncateParallelOutput } from "./truncate.ts";
 
 const MAX_PARALLEL_TASKS = 8;
@@ -149,7 +156,7 @@ interface UsageStats {
 
 interface SingleResult {
 	agent: string;
-	agentSource: "user" | "project" | "unknown";
+	agentSource: AgentSource | "unknown";
 	task: string;
 	exitCode: number;
 	messages: Message[];
@@ -158,6 +165,7 @@ interface SingleResult {
 	model?: string;
 	stopReason?: string;
 	errorMessage?: string;
+	failureKind?: "concurrency";
 	step?: number;
 }
 
@@ -264,6 +272,7 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	concurrencyGate: AgentConcurrencyGate,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -277,6 +286,22 @@ async function runSingleAgent(
 			messages: [],
 			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			step,
+		};
+	}
+
+	const releaseConcurrency = concurrencyGate.tryAcquire(agent.concurrencyGroup);
+	if (!releaseConcurrency) {
+		return {
+			agent: agent.name,
+			agentSource: agent.source,
+			task,
+			exitCode: 1,
+			messages: [],
+			stderr: `Agent concurrency group "${agent.concurrencyGroup}" is already active. Wait for the current worker to finish.`,
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			model: agent.model,
+			failureKind: "concurrency",
 			step,
 		};
 	}
@@ -366,6 +391,33 @@ async function runSingleAgent(
 			};
 
 			const stdoutLines = new LineStream(processLine);
+			let settled = false;
+			let spawned = false;
+			let cancelEscalation: (() => void) | undefined;
+			let abandonTimer: ReturnType<typeof setTimeout> | undefined;
+			let killProc: (() => void) | undefined;
+			const cleanup = () => {
+				cancelEscalation?.();
+				cancelEscalation = undefined;
+				if (abandonTimer) clearTimeout(abandonTimer);
+				abandonTimer = undefined;
+				if (signal && killProc) signal.removeEventListener("abort", killProc);
+			};
+			const finish = (code: number) => {
+				if (settled) return;
+				settled = true;
+				stdoutLines.end();
+				cleanup();
+				resolve(code);
+			};
+			// Stop waiting for a "close" that is not coming. Hanging here would keep
+			// the whole tool call pending for the rest of the session, and the
+			// agent's concurrency group with it.
+			const abandonAfter = (delayMs: number) => {
+				if (settled || abandonTimer) return;
+				abandonTimer = setTimeout(() => finish(1), delayMs);
+				abandonTimer.unref?.();
+			};
 
 			proc.stdout.on("data", (data: Buffer) => {
 				stdoutLines.write(data);
@@ -375,22 +427,24 @@ async function runSingleAgent(
 				currentResult.stderr += data.toString();
 			});
 
-			proc.on("close", (code) => {
-				stdoutLines.end();
-				resolve(code ?? 0);
+			proc.once("spawn", () => {
+				spawned = true;
 			});
-
-			proc.on("error", () => {
-				resolve(1);
+			proc.on("close", (code) => finish(code ?? 0));
+			proc.on("error", (error) => {
+				currentResult.stderr += `${currentResult.stderr ? "\n" : ""}${error.message}`;
+				// A child that spawned still owes a "close" carrying its real exit code,
+				// so an error must not settle the run on its own. It does mean something
+				// went wrong with the handle, so bound the wait for that close.
+				if (shouldFinishOnChildError(spawned)) finish(1);
+				else abandonAfter(CHILD_TERMINATION_GRACE_MS);
 			});
 
 			if (signal) {
-				const killProc = () => {
+				killProc = () => {
+					if (wasAborted || settled) return;
 					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
+					cancelEscalation = terminateWithEscalation(proc, { onUnterminated: () => finish(1) });
 				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
@@ -401,6 +455,7 @@ async function runSingleAgent(
 		if (wasAborted) throw new Error("Subagent was aborted");
 		return currentResult;
 	} finally {
+		releaseConcurrency();
 		if (tmpPromptPath)
 			try {
 				fs.unlinkSync(tmpPromptPath);
@@ -446,6 +501,8 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	const concurrencyGate = new AgentConcurrencyGate();
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
@@ -467,7 +524,8 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const agentScope: AgentScope = params.agentScope ?? "user";
-			const discovery = discoverAgents(ctx.cwd, agentScope);
+			const extensionAgents = discoverExtensionAgents(pi.events, ctx.cwd);
+			const discovery = discoverAgents(ctx.cwd, agentScope, extensionAgents);
 			const agents = discovery.agents;
 			const confirmProjectAgents = params.confirmProjectAgents ?? true;
 
@@ -558,6 +616,7 @@ export default function (pi: ExtensionAPI) {
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
+						concurrencyGate,
 					);
 					results.push(result);
 
@@ -589,6 +648,32 @@ export default function (pi: ExtensionAPI) {
 						],
 						details: makeDetails("parallel")([]),
 					};
+
+				const requestedAgentNames = params.tasks.map((task) => task.agent);
+				const concurrencyConflict = findParallelConcurrencyConflict(agents, requestedAgentNames);
+				if (concurrencyConflict) {
+					return {
+						content: [{
+							type: "text",
+							text: `Parallel tasks cannot include multiple agents from concurrency group "${concurrencyConflict}". Run editing workers sequentially.`,
+						}],
+						details: makeDetails("parallel")([]),
+						isError: true,
+					};
+				}
+				const activeConcurrencyConflict = requestedAgentNames
+					.map((name) => agents.find((agent) => agent.name === name)?.concurrencyGroup)
+					.find((group) => concurrencyGate.isActive(group));
+				if (activeConcurrencyConflict) {
+					return {
+						content: [{
+							type: "text",
+							text: `Agent concurrency group "${activeConcurrencyConflict}" is already active. Wait for the current worker to finish.`,
+						}],
+						details: makeDetails("parallel")([]),
+						isError: true,
+					};
+				}
 
 				// Track all results for streaming updates
 				const allResults: SingleResult[] = new Array(params.tasks.length);
@@ -636,6 +721,7 @@ export default function (pi: ExtensionAPI) {
 							}
 						},
 						makeDetails("parallel"),
+						concurrencyGate,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -658,6 +744,7 @@ export default function (pi: ExtensionAPI) {
 						},
 					],
 					details: makeDetails("parallel")(results),
+					isError: results.some((result) => result.failureKind === "concurrency"),
 				};
 			}
 
@@ -672,6 +759,7 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate,
 					makeDetails("single"),
+					concurrencyGate,
 				);
 				const isError = isFailedResult(result);
 				if (isError) {
