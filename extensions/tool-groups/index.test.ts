@@ -139,6 +139,16 @@ describe("tool-groups extension", () => {
 		const singleRoot = new Container();
 		singleRoot.addChild(fakeTool("read", { path: "/tmp/single.ts" }) as any);
 
+		const subagentRoot = new Container();
+		subagentRoot.addChild(fakeTool("subagent", { agent: "scout", task: "Explore" }) as any);
+		subagentRoot.addChild(fakeTool("subagent", {
+			tasks: [
+				{ agent: "scout", task: "Explore one" },
+				{ agent: "reviewer", task: "Review" },
+				{ agent: "scout", task: "Explore two" },
+			],
+		}) as any);
+
 		try {
 			const first = await loadGeneration();
 			await first.start?.({}, ctx);
@@ -147,6 +157,9 @@ describe("tool-groups extension", () => {
 			expect(grouped).toContain("Read /tmp/a.ts");
 			expect(grouped).toContain("Bash printf ok");
 			expect(grouped).not.toContain("FULL:read");
+			const groupedSubagents = subagentRoot.render(100).join("\n");
+			expect(groupedSubagents).toContain("Subagent (scout) Explore");
+			expect(groupedSubagents).toContain("Subagent (2 scouts, reviewer)");
 			expect(colors).toContain("thinkingLow");
 			expect(colors).not.toContain("success");
 			expect(singleRoot.render(100)).toEqual(["FULL:read"]);

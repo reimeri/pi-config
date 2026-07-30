@@ -264,6 +264,34 @@ describe("tool status and summaries", () => {
 		expect(summarizeToolArgs(custom)).toBe("grouped tool calls");
 	});
 
+	test("summarizes subagent calls by agent name and counts duplicates", () => {
+		const single = tool("subagent");
+		single.args = { agent: "scout", task: "Explore the codebase" };
+		expect(summarizeToolArgs(single)).toBe("(scout) Explore the codebase");
+
+		const parallel = tool("subagent");
+		parallel.args = {
+			tasks: [
+				{ agent: "scout", task: "Explore one" },
+				{ agent: "reviewer", task: "Review" },
+				{ agent: "scout", task: "Explore two" },
+			],
+		};
+		expect(summarizeToolArgs(parallel)).toBe("(2 scouts, reviewer)");
+
+		const chain = tool("subagent");
+		chain.args = {
+			chain: [
+				{ agent: "researcher", task: "Research" },
+				{ agent: "researcher", task: "Synthesize {previous}" },
+			],
+		};
+		expect(summarizeToolArgs(chain)).toBe("(2 researchers)");
+
+		single.args = { agent: "reviewer" };
+		expect(summarizeToolArgs(single)).toBe("(reviewer)");
+	});
+
 	test("bounds work and output for very large tool arguments", () => {
 		const bash = tool("bash");
 		bash.args = { command: "x".repeat(1_000_000) };
@@ -279,5 +307,20 @@ describe("tool status and summaries", () => {
 		const customSummary = summarizeToolArgs(custom);
 		expect(customSummary.length).toBeLessThan(4_100);
 		expect(customSummary.startsWith("payload=")).toBe(true);
+
+		const subagent = tool("subagent");
+		const boundedChain = new Proxy(
+			Array.from({ length: 10_000 }, () => ({ agent: "scout", task: "Explore" })),
+			{
+				get(target, property, receiver) {
+					if (typeof property === "string" && /^\d+$/.test(property) && Number(property) >= 100) {
+						throw new Error("subagent summary read past its item budget");
+					}
+					return Reflect.get(target, property, receiver);
+				},
+			},
+		);
+		subagent.args = { chain: boundedChain };
+		expect(summarizeToolArgs(subagent)).toBe("(100 scouts, +9900 more)");
 	});
 });

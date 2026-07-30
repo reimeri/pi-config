@@ -190,6 +190,7 @@ export function humanizeToolName(name: string): string {
 
 const MAX_SUMMARY_SOURCE_CHARS = 4_096;
 const MAX_FALLBACK_FIELDS = 6;
+const MAX_SUBAGENT_SUMMARY_ITEMS = 100;
 
 function scalar(value: unknown): string | undefined {
 	if (typeof value === "string") {
@@ -229,6 +230,37 @@ function fallbackArgSummary(args: Record<string, unknown>): string {
 	return sanitizeSummary(parts.join(", "));
 }
 
+function subagentSummary(args: Record<string, unknown>): string | undefined {
+	const collection = Array.isArray(args.chain) && args.chain.length > 0
+		? args.chain
+		: Array.isArray(args.tasks) && args.tasks.length > 0
+			? args.tasks
+			: undefined;
+	const counts = new Map<string, number>();
+	let omitted = 0;
+
+	if (collection) {
+		const limit = Math.min(collection.length, MAX_SUBAGENT_SUMMARY_ITEMS);
+		for (let index = 0; index < limit; index++) {
+			const item = collection[index];
+			if (!item || typeof item !== "object") continue;
+			const name = scalar((item as Record<string, unknown>).agent)?.trim();
+			if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+		}
+		omitted = collection.length - limit;
+	} else {
+		const name = scalar(args.agent)?.trim();
+		if (name) counts.set(name, 1);
+	}
+
+	if (counts.size === 0 && omitted === 0) return undefined;
+	const labels = Array.from(counts, ([name, count]) =>
+		count === 1 ? name : `${count} ${name}s`);
+	if (omitted > 0) labels.push(`+${omitted} more`);
+	const task = collection ? undefined : scalar(args.task)?.trim();
+	return sanitizeSummary(`(${labels.join(", ")})${task ? ` ${task}` : ""}`);
+}
+
 export function summarizeToolArgs(tool: ToolLike): string {
 	const args = tool.args && typeof tool.args === "object"
 		? tool.args as Record<string, unknown>
@@ -255,6 +287,10 @@ export function summarizeToolArgs(tool: ToolLike): string {
 		return sanitizeSummary(`${pattern}${path ? ` in ${path}` : ""}`);
 	}
 	if (name === "ls") return sanitizeSummary(scalar(args.path) ?? ".");
+	if (name === "subagent") {
+		const summary = subagentSummary(args);
+		if (summary) return summary;
+	}
 	if (name === "apply_patch") {
 		const patch = scalar(args.patch) ?? scalar(args.input) ?? "";
 		const files = [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)]
