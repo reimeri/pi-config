@@ -121,7 +121,11 @@ describe("supervisor extension", () => {
 			sourceId: "supervisor",
 			concurrencyGroup: "workspace-writer",
 		});
-		expect(state.modeUpdates.at(-1)).toMatchObject({ label: "◆ supervisor", compactLabel: "◆" });
+		expect(state.modeUpdates.at(-1)).toMatchObject({
+			label: "◆ supervisor",
+			compactLabel: "◆",
+			borderColor: "thinkingLow",
+		});
 	});
 
 	test("appends supervisor instructions only while enabled and installs no hard gate", async () => {

@@ -38,7 +38,7 @@ export default function supervisorExtension(pi: ExtensionAPI): void {
 		setEditorTopBarMode(pi, SUPERVISOR_MODE_ID, enabled ? "◆ supervisor" : undefined, {
 			compactLabel: "◆",
 			priority: SUPERVISOR_MODE_PRIORITY,
-			borderColor: "warning",
+			borderColor: "thinkingLow",
 		});
 	}
 

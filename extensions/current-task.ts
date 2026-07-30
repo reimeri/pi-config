@@ -24,11 +24,13 @@ function taskLength(value: string): number {
 
 function modeBorderColor(
 	modes: EditorTopBarMode[],
+	thinkingLow: (text: string) => string,
 	warning: (text: string) => string,
 	error: (text: string) => string,
 ): ((text: string) => string) | undefined {
 	if (modes.some((mode) => mode.borderColor === "error")) return error;
 	if (modes.some((mode) => mode.borderColor === "warning")) return warning;
+	if (modes.some((mode) => mode.borderColor === "thinkingLow")) return thinkingLow;
 	return undefined;
 }
 
@@ -98,6 +100,7 @@ class CurrentTaskEditor extends CustomEditor {
 		private readonly getTask: () => string | undefined,
 		private readonly getModes: () => EditorTopBarMode[],
 		private readonly neutral: (text: string) => string,
+		private readonly thinkingLow: (text: string) => string,
 		private readonly warning: (text: string) => string,
 		private readonly error: (text: string) => string,
 	) {
@@ -108,7 +111,8 @@ class CurrentTaskEditor extends CustomEditor {
 		const task = normalizeTask(this.getTask() ?? "");
 		const modes = this.getModes();
 		const previousBorderColor = this.borderColor;
-		const activeBorderColor = modeBorderColor(modes, this.warning, this.error) ?? this.neutral;
+		const activeBorderColor =
+			modeBorderColor(modes, this.thinkingLow, this.warning, this.error) ?? this.neutral;
 
 		this.borderColor = activeBorderColor;
 		let lines: string[];
@@ -145,7 +149,9 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 			const label = normalizeTask(update.label);
 			const compactLabel = normalizeTask(update.compactLabel ?? label);
 			const borderColor =
-				update.borderColor === "warning" || update.borderColor === "error"
+				update.borderColor === "thinkingLow" ||
+				update.borderColor === "warning" ||
+				update.borderColor === "error"
 					? update.borderColor
 					: undefined;
 			activeModes.set(update.id, {
@@ -240,6 +246,7 @@ export default function currentTaskExtension(pi: ExtensionAPI) {
 				() => pi.getSessionName(),
 				getActiveModes,
 				(text) => ctx.ui.theme.fg("thinkingOff", text),
+				(text) => ctx.ui.theme.fg("thinkingLow", text),
 				(text) => ctx.ui.theme.fg("warning", text),
 				(text) => ctx.ui.theme.fg("error", text),
 			);

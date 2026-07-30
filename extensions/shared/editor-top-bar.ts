@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const EDITOR_TOP_BAR_MODE_EVENT = "editor-top-bar:mode";
 
-export type EditorTopBarModeBorderColor = "warning" | "error";
+export type EditorTopBarModeBorderColor = "thinkingLow" | "warning" | "error";
 
 export interface EditorTopBarMode {
 	id: string;
