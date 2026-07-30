@@ -1,6 +1,6 @@
 # Supervisor mode
 
-Supervisor mode turns the main Pi agent into a delegation-focused coordinator. The main agent may inspect the project and use Bash for information gathering, but it should delegate code changes and implementation verification to the conditional `worker` subagent.
+Supervisor mode turns the main Pi agent into a delegation-focused coordinator. The main agent may inspect the project and use Bash for information gathering and independent verification. It delegates code changes and their targeted implementation checks to the conditional `worker` subagent, then inspects or confirms the results itself.
 
 ## Usage
 
@@ -8,6 +8,33 @@ Supervisor mode turns the main Pi agent into a delegation-focused coordinator. T
 - `--supervisor` — start enabled when the current session branch has no persisted tool-mode state.
 
 The editor top bar shows `◆ supervisor` while the mode is active.
+
+## Intended workflow
+
+The main agent acts as the senior planner and integrator:
+
+1. Investigate directly or use `scout`; use `researcher` when senior technical or external research is useful.
+2. Resolve ambiguity and select the architecture, interfaces, invariants, and sequencing.
+3. For high-risk cross-cutting work, ask `reviewer` to critique the implementation specification.
+4. Break implementation into TODO items that each represent one leaf worker package.
+5. Invoke one worker with one package, inspect its diff, and verify its acceptance criteria before assigning the next package.
+6. Review the integrated result and delegate narrow follow-up fixes when needed.
+
+A leaf package has one independently reviewable outcome and one primary responsibility, normally within one subsystem plus focused tests. Split work that combines independently verifiable concerns or several boundaries such as persistence, domain policy, transactions, server integration, UI, migrations, and test infrastructure. Keep tightly coupled code and tests together; decomposition should not become file-by-file delegation.
+
+Worker assignments may include extensive background, but their authority must remain narrow. Each assignment should explicitly provide:
+
+- goal;
+- approved design and relevant background;
+- preconditions and current repository state;
+- in-scope paths and symbols;
+- required behavior and invariants;
+- out-of-scope work;
+- acceptance criteria;
+- targeted verification and stop conditions;
+- expected completion report.
+
+Do not ask a worker to implement an entire moderate or complex milestone, choose major designs, fix anything else it encounters, or continue into subsequent tasks. TODOs should match worker packages rather than broad feature phases.
 
 ## Main-agent tools
 
@@ -34,6 +61,8 @@ While supervisor mode is enabled, the extension contributes `worker.md` to the s
 
 The worker definition is stored beside the extension rather than in `~/.pi/agent/agents`, so it does not become a normal globally discoverable agent.
 
+Before editing, the worker checks that its assignment is a coherent leaf with every required contract element and resolved design decisions. It reports `Scope Rejected` with every missing assignment element or decision and a suggested split rather than guessing, partially implementing an oversized package, or silently broadening scope.
+
 ## Concurrency
 
 The worker declares the `workspace-writer` concurrency group. The subagent extension:
@@ -41,10 +70,11 @@ The worker declares the `workspace-writer` concurrency group. The subagent exten
 - rejects parallel requests containing multiple agents from that group;
 - rejects overlapping worker launches from separate simultaneous tool calls;
 - allows one worker alongside parallel read-only agents;
-- allows repeated worker steps in a chain because chain steps are sequential;
 - releases the group after success, failure, or abort.
 
-This protection is process-local. Supervisor mode intentionally does not implement worktree allocation, cross-process locking, merging, or concurrent editing. Editing workers should remain sequential in the current checkout.
+The underlying subagent engine can reuse a concurrency group in sequential chains, but the supervisor workflow requires a separate single call for every worker package so the main agent must inspect and verify each result. In this first iteration that no-worker-chain rule is behavioral rather than mechanically enforced.
+
+Concurrency protection is process-local and prevents overlap, not oversized assignments or missing checkpoints. Supervisor mode intentionally does not implement worktree allocation, cross-process locking, merging, or concurrent editing. Editing workers should remain sequential in the current checkout.
 
 ## Mode composition
 

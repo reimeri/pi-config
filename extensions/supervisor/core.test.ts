@@ -28,10 +28,36 @@ describe("supervisorTools", () => {
 });
 
 describe("supervisorInstructions", () => {
-	test("states delegation, bash, concurrency, and mode-composition guidance", () => {
+	test("assigns planning ownership and requires leaf-sized worker checkpoints", () => {
 		const prompt = supervisorInstructions();
-		expect(prompt).toContain("Delegate code changes");
+		expect(prompt).toContain("senior planner and integrator");
+		expect(prompt).toContain("You own requirements analysis, architecture, decomposition");
+		expect(prompt).toContain("one independently reviewable outcome");
+		expect(prompt).toContain("Never assign an entire moderate or complex milestone");
+		for (const section of [
+			"Goal",
+			"Approved design and relevant background",
+			"Preconditions and current repository state",
+			"In-scope paths and symbols",
+			"Required behavior and invariants",
+			"Out of scope",
+			"Acceptance criteria",
+			"Targeted verification",
+			"Stop conditions",
+			"Expected report",
+		]) {
+			expect(prompt).toContain(section);
+		}
+		expect(prompt).toContain("Never place worker in a subagent chain");
+		expect(prompt).toContain("After every worker return, inspect the diff");
+	});
+
+	test("retains bash, concurrency, review, and mode-composition guidance", () => {
+		const prompt = supervisorInstructions();
 		expect(prompt).toContain("Never launch more than one worker concurrently");
+		expect(prompt).toContain("use reviewer to critique the implementation specification");
+		expect(prompt).toContain("Worker verifies its assigned leaf with targeted checks");
+		expect(prompt).toContain("supervisor independently inspects or confirms");
 		expect(prompt).toContain("Bash remains available");
 		expect(prompt).toContain("In plan mode, do not delegate implementation");
 		expect(prompt).toContain("exists only while this mode is active");
