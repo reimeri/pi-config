@@ -76,7 +76,24 @@ describe("describeFailure", () => {
 	});
 
 	test("warns that an aborted agent may already have edited files", () => {
-		expect(describeFailure(result({ stopReason: "aborted" }))).toContain("may have already changed files");
+		const messages: Message[] = [assistant([toolCall("edit", { path: "a.ts" })])];
+		expect(describeFailure(result({ stopReason: "aborted", messages }))).toContain("may have already changed files");
+	});
+
+	test("does not warn about files when the abort landed before the child spoke", () => {
+		// A run aborted while queued for its group never spawned, and warning about the workspace
+		// anyway is how a warning stops being read.
+		const text = describeFailure(result({ stopReason: "aborted" }));
+		expect(text).toContain("before it started");
+		expect(text).not.toContain("may have already changed files");
+	});
+
+	test("says the child may still be running when it outlived the run", () => {
+		// Silence here is not evidence: the run stopped reading a child that is still alive, so an
+		// empty message list says nothing about what that child is about to edit.
+		const text = describeFailure(result({ stopReason: "aborted", childOutlivedRun: true }));
+		expect(text).toContain("did not exit");
+		expect(text).not.toContain("untouched");
 	});
 
 	test("falls back to the exit code", () => {

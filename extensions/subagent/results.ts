@@ -35,6 +35,8 @@ export interface SingleResult {
 	workspace?: WorkspaceReport;
 	/** Reused child session, when the call supplied a sessionKey. No `run` means none could be made. */
 	session?: { key: string; run?: number };
+	/** The run stopped waiting for a child that had not exited, so that child may still be working. */
+	childOutlivedRun?: boolean;
 }
 
 /**
@@ -95,6 +97,8 @@ export function failureResult(params: {
 	agentSource?: AgentSource | "unknown";
 	model?: string;
 	failureKind?: "concurrency";
+	/** Set when the run failed for a reason `describeFailure` already words well, such as an abort. */
+	stopReason?: string;
 	step?: number;
 }): SingleResult {
 	return {
@@ -107,6 +111,7 @@ export function failureResult(params: {
 		usage: emptyUsage(),
 		model: params.model,
 		failureKind: params.failureKind,
+		stopReason: params.stopReason,
 		step: params.step,
 	};
 }
@@ -131,7 +136,18 @@ export function describeFailure(result: SingleResult): string {
 		case "length":
 			return "hit its output limit mid-run: the work it describes is incomplete and any files it touched may be half-edited";
 		case "aborted":
-			return "was aborted: it may have already changed files";
+			// A child that outlived the run is the one case where no message proves anything: the run
+			// stopped reading its output while it was still alive, so what it does next is unknown and
+			// unbounded rather than merely unrecorded.
+			if (result.childOutlivedRun)
+				return "was aborted but its child did not exit: it may still be running and changing files";
+			// A child cannot have edited anything without first emitting the assistant turn that
+			// requested the tool, so an abort with no messages — one that landed while the run was
+			// still queued for its concurrency group or session — is known to have changed nothing.
+			// Warning about files either way would train the parent to ignore the warning.
+			return result.messages.length === 0
+				? "was aborted before it started, leaving the workspace untouched"
+				: "was aborted: it may have already changed files";
 		case "error":
 			return "failed with an error";
 		default:

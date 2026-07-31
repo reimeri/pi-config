@@ -29,7 +29,13 @@ import {
 import { type Component, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
-import { AgentConcurrencyGate, findChainConcurrencyConflicts, findParallelConcurrencyConflict } from "./concurrency.ts";
+import {
+	AgentConcurrencyGate,
+	findChainConcurrencyConflicts,
+	findParallelConcurrencyConflict,
+	GATE_WAIT_MS,
+	type GateFailure,
+} from "./concurrency.ts";
 import { LineStream } from "./line-stream.ts";
 import {
 	CHILD_TERMINATION_GRACE_MS,
@@ -70,6 +76,13 @@ function formatTokens(count: number): string {
 	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
 	if (count < 1000000) return `${Math.round(count / 1000)}k`;
 	return `${(count / 1000000).toFixed(1)}M`;
+}
+
+function formatDuration(ms: number): string {
+	const seconds = Math.round(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.round(seconds / 60);
+	return `${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
 function formatUsageStats(
@@ -235,6 +248,42 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+/**
+ * Why a session key could not be taken, said in terms of what the parent should do next.
+ *
+ * `abandoned` is the case worth separating: the child from a previous run never exited and still has
+ * the file open, so unlike an ordinary busy key this one is not going to free up and telling the
+ * parent to wait would send it in circles for the rest of the conversation.
+ */
+/**
+ * Why a concurrency group could not be taken, said in terms of what the parent should do next.
+ *
+ * `abandoned` is per-run here rather than permanent, unlike a session's: the run that held the group
+ * gave up on a child that never exited, so the group is not passed to whoever was queued behind it,
+ * but a later run the parent decides to launch can still have it.
+ */
+function groupBusyMessage(reason: GateFailure, group: string | undefined, agentName: string): string {
+	switch (reason) {
+		case "aborted":
+			return `Subagent was aborted while queued for concurrency group "${group}".`;
+		case "abandoned":
+			return `Agent concurrency group "${group}" was not handed on: the run holding it stopped waiting for a child that never exited, and that child may still be changing files. Check what it left behind before launching another ${agentName}.`;
+		default:
+			return `Agent concurrency group "${group}" was still held after waiting ${formatDuration(GATE_WAIT_MS)}. The run holding it has been going that long and may be stuck; check on it before delegating more work to this group.`;
+	}
+}
+
+function sessionBusyMessage(reason: GateFailure, sessionKey: string, agentName: string): string {
+	switch (reason) {
+		case "aborted":
+			return `Subagent was aborted while queued for session "${sessionKey}".`;
+		case "abandoned":
+			return `Subagent session "${sessionKey}" cannot be reused: the child from its previous run never exited and still has the session file open. Use a different sessionKey, and restate anything the task assumed that session already held.`;
+		default:
+			return `Subagent session "${sessionKey}" was still in use by a running ${agentName} after waiting ${formatDuration(GATE_WAIT_MS)}. Wait for it to finish, or use a different sessionKey.`;
+	}
+}
+
 async function runSingleAgent(
 	defaultCwd: string,
 	agents: AgentConfig[],
@@ -262,29 +311,10 @@ async function runSingleAgent(
 		});
 	}
 
-	const releaseConcurrency = concurrencyGate.tryAcquire(agent.concurrencyGroup);
-	if (!releaseConcurrency) {
-		return failureResult({
-			agent: agent.name,
-			agentSource: agent.source,
-			task,
-			step,
-			model: agent.model,
-			failureKind: "concurrency",
-			message: `Agent concurrency group "${agent.concurrencyGroup}" is already active. Wait for the current worker to finish.`,
-		});
-	}
-
-	// Session flags are decided below, once the store has answered; everything before that point is
-	// identical between runs of one session, which is what lets the provider cache the prefix.
-	const args: string[] = ["--mode", "json", "-p", "--exclude-tools", "subagent"];
-	if (agent.model) args.push("--model", agent.model);
-	if (agent.thinking) args.push("--thinking", agent.thinking);
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
-
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 	let releaseSession: (() => void) | undefined;
+	let heldSessionId: string | undefined;
 	// Set on the paths that stop waiting for a child that has not exited. Its session file is still
 	// open to it, so the lock on that session must not come back. Read in the `finally`, hence out
 	// here rather than beside the run it belongs to.
@@ -302,10 +332,11 @@ async function runSingleAgent(
 		step,
 	};
 
+	let status = "(running...)";
 	const emitUpdate = () => {
 		if (onUpdate) {
 			onUpdate({
-				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
+				content: [{ type: "text", text: getFinalOutput(currentResult.messages) || status }],
 				details: makeDetails([currentResult]),
 			});
 		}
@@ -313,22 +344,65 @@ async function runSingleAgent(
 
 	const workingDir = cwd ?? defaultCwd;
 
+	const queuedForGroup = concurrencyGate.isActive(agent.concurrencyGroup);
+	if (queuedForGroup) {
+		// The wait is silent otherwise, and a worker that has not started looks identical to one that
+		// started and has yet to say anything.
+		status = `(waiting for concurrency group "${agent.concurrencyGroup}"...)`;
+		emitUpdate();
+	}
+	const concurrency = await concurrencyGate.acquire(agent.concurrencyGroup, { timeoutMs: GATE_WAIT_MS, signal });
+	status = "(running...)";
+	if (!concurrency.ok) {
+		return failureResult({
+			agent: agent.name,
+			agentSource: agent.source,
+			task,
+			step,
+			model: agent.model,
+			failureKind: concurrency.reason === "aborted" ? undefined : "concurrency",
+			stopReason: concurrency.reason === "aborted" ? "aborted" : undefined,
+			message: groupBusyMessage(concurrency.reason, agent.concurrencyGroup, agent.name),
+		});
+	}
+	// The waiting text is the last thing the parent was shown, and nothing else emits until the child
+	// speaks — which for an editing worker is a minute of spawn and first turn after the wait ended.
+	if (queuedForGroup) emitUpdate();
+	const releaseConcurrency = concurrency.release;
+
+	// Session flags are decided below, once the store has answered; everything before that point is
+	// identical between runs of one session, which is what lets the provider cache the prefix.
+	const args: string[] = ["--mode", "json", "-p", "--exclude-tools", "subagent"];
+	if (agent.model) args.push("--model", agent.model);
+	if (agent.thinking) args.push("--thinking", agent.thinking);
+	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+
 	try {
 		const session = sessionKey ? await sessions.resolve({ agent: agent.name, cwd: workingDir, sessionKey }) : undefined;
 		if (sessionKey && session) {
 			// Two children writing one session file would interleave their histories into something
 			// neither of them wrote.
-			releaseSession = sessionGate.tryAcquire(session.id);
-			if (!releaseSession) {
+			const queuedForSession = sessionGate.isActive(session.id);
+			if (queuedForSession) {
+				status = `(waiting for subagent session "${sessionKey}"...)`;
+				emitUpdate();
+			}
+			const held = await sessionGate.acquire(session.id, { timeoutMs: GATE_WAIT_MS, signal });
+			status = "(running...)";
+			if (queuedForSession && held.ok) emitUpdate();
+			if (!held.ok) {
 				return failureResult({
 					agent: agent.name,
 					agentSource: agent.source,
 					task,
 					step,
 					model: agent.model,
-					message: `Subagent session "${sessionKey}" is already in use by a running ${agent.name}. Wait for it to finish, or use a different sessionKey.`,
+					stopReason: held.reason === "aborted" ? "aborted" : undefined,
+					message: sessionBusyMessage(held.reason, sessionKey, agent.name),
 				});
 			}
+			releaseSession = held.release;
+			heldSessionId = session.id;
 			args.push("--session-id", session.id, "--session-dir", session.dir);
 			currentResult.session = { key: sessionKey, run: session.begin() };
 		} else {
@@ -474,6 +548,9 @@ async function runSingleAgent(
 		});
 
 		currentResult.exitCode = exitCode;
+		// Carried into the result because it changes what the messages mean: they stop at the moment
+		// the run gave up reading, not at the moment the child stopped working.
+		if (childOutlivedRun) currentResult.childOutlivedRun = true;
 		// Deliberately not passed the abort signal: an aborted worker is exactly the case where the
 		// parent most needs to know which files were left changed.
 		if (agent.captureDiff) {
@@ -492,9 +569,16 @@ async function runSingleAgent(
 		// Deliberately not released when the child outlived the run: it still has the session file
 		// open, and a second pi appending to the same file would interleave two histories into one
 		// neither of them wrote. Holding the key costs the parent a session; releasing it costs the
-		// transcript. The concurrency group is released either way, as it always was — waiting on a
-		// process that may never exit would block the agent for the rest of the conversation.
-		if (!childOutlivedRun) releaseSession?.();
+		// transcript. Abandoning rather than simply not releasing is what stops the next run from
+		// queuing for minutes on a key nobody is coming back to. The concurrency group is released
+		// either way, as it always was — waiting on a process that may never exit would block the
+		// agent for the rest of the conversation — but it is not handed to whoever is queued behind
+		// it: that child is still alive and may still be editing, and the queue would put a second
+		// worker in the same tree without anyone having read why the first one was given up on.
+		if (childOutlivedRun) {
+			sessionGate.abandon(heldSessionId);
+			concurrencyGate.dropWaiters(agent.concurrencyGroup);
+		} else releaseSession?.();
 		releaseConcurrency();
 		if (tmpPromptPath)
 			try {
@@ -782,19 +866,12 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-				const activeConcurrencyConflict = requestedAgentNames
-					.map((name) => agents.find((agent) => agent.name === name)?.concurrencyGroup)
-					.find((group) => concurrencyGate.isActive(group));
-				if (activeConcurrencyConflict) {
-					return {
-						content: [{
-							type: "text",
-							text: `Agent concurrency group "${activeConcurrencyConflict}" is already active. Wait for the current worker to finish.`,
-						}],
-						details: makeDetails("parallel")([]),
-						isError: true,
-					};
-				}
+				// A group already held by another tool call no longer rejects the batch. The one task
+				// that needs it queues for it, which is what the parent asked for, while its read-only
+				// siblings — the reason the batch was parallel — run immediately instead of being
+				// thrown away over a conflict none of them had. The waiting task does occupy one of
+				// the MAX_CONCURRENCY slots while it queues, but `findParallelConcurrencyConflict`
+				// above caps that at one task per group, so it cannot stall the batch.
 
 				// Track all results for streaming updates
 				const allResults: SingleResult[] = new Array(params.tasks.length);
@@ -839,8 +916,13 @@ export default function (pi: ExtensionAPI) {
 							signal,
 							// Per-task update callback
 							(partial) => {
-								if (partial.details?.results[0]) {
-									allResults[index] = partial.details.results[0];
+								const inProgress = partial.details?.results[0];
+								if (inProgress) {
+									// A partial carries the run's initial exit code of 0, which is the sentinel
+									// for a finished, successful task. Keeping the placeholder's -1 is what makes
+									// a task still running — or, since the gate learned to queue, one that has
+									// not started at all — count and render as running rather than as done.
+									allResults[index] = { ...inProgress, exitCode: -1 };
 									emitParallelUpdate();
 								}
 							},

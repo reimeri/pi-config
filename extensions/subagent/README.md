@@ -76,7 +76,7 @@ Sessions are:
 
 - **scoped** to one agent, one working directory, and one parent session. A key reused across agents or checkouts starts a separate session rather than resuming a history the resuming agent would read as its own past work;
 - **ephemeral**, living in a temp directory removed at session shutdown. They make a sequence of related tasks cheap; they are not agent memory;
-- **exclusive**, since two children writing one session file would interleave their histories. A parallel batch repeating a key is rejected before any child starts, and a session already in use fails the second run. A child that outlives its run — one that survived termination, or whose run was abandoned after a handle error — keeps its key for the rest of the conversation, because the file is still open to it.
+- **exclusive**, since two children writing one session file would interleave their histories. A parallel batch repeating a key is rejected before any child starts, and a second run of a session already in use waits for the first to finish. A child that outlives its run — one that survived termination, or whose run was abandoned after a handle error — keeps its key for the rest of the conversation, because the file is still open to it; runs asking for that key are refused immediately rather than made to wait for a child that will not exit.
 
 A key the tool cannot honour, because no temp directory could be made, does not fail the run: the child runs without a session, and the note says the session was unavailable instead of giving a run number. That matters to the parent rather than to the child, since the task was likely written as a delta against context the child now does not have.
 
@@ -93,6 +93,7 @@ What does change the prefix, and so costs a cache read: editing the agent's Mark
 An agent may declare `concurrency: <group>` in its frontmatter. Within one parent Pi process:
 
 - only one child from a group may run at a time, including across simultaneous `subagent` tool calls;
+- a second run of a busy group **waits** for it rather than failing, and starts as soon as the group comes free;
 - a parallel request containing the same group more than once is rejected before any child starts;
 - a chain containing a grouped agent is rejected before any child starts;
 - agents without a group retain normal parallel behavior;
@@ -101,6 +102,23 @@ An agent may declare `concurrency: <group>` in its frontmatter. Within one paren
 The supervisor worker uses `workspace-writer`, preventing concurrent edits in the same checkout. This is not a cross-process or filesystem lock.
 
 The chain rule is about checkpoints rather than overlap. Chain steps are sequential, so they never race; the problem is that a chain would run several editing packages back to back with the parent seeing only the last one's output, skipping the diff inspection and verification that are supposed to happen between them.
+
+### Waiting rather than refusing
+
+A busy group used to fail the run outright, telling the parent to wait for the current worker. That reads as reasonable and behaves badly, because the caller is a model: it has no way to sleep, so its only move is to spend a turn and try again blind. Two workers launched in one turn made the second one fail instead of following the first.
+
+The gate now queues. A run that finds its group held stays pending until the holder finishes, and the key is passed straight to the longest-waiting caller in the same tick, so arrivals cannot barge ahead of a caller that has been waiting minutes. While queued, the tool shows `(waiting for concurrency group "…"...)` rather than looking like a child that has not spoken yet.
+
+Two things bound the wait:
+
+- **abort** ends it immediately, so escape on a queued worker is not held hostage by a run it never started;
+- a **10-minute timeout**, for the key nobody will release. Timing out is reported as a failure that says how long it waited and that the holder may be stuck, since by then the interesting problem is the other run rather than this one.
+
+A run whose child outlived it is the other bound on the queue: the group is still released, as it always was, but it is not handed to whoever was queued behind it. That child is still alive and may still be editing, and inheriting its group would put a second worker in the same tree; the queued run is failed with a message saying so, and a later run the parent chooses to launch — having read why the first was given up on — can take the group normally.
+
+The same queue governs `sessionKey`, whose keys are session ids rather than groups, so unrelated sessions never wait on each other. A session whose child outlived its run is a special case: that child still has the session file open and is never coming back, so the key is *abandoned* rather than left busy, and later runs asking for it fail at once — with a message telling the parent to pick another key — instead of sitting through a timeout that cannot help them.
+
+Parallel mode no longer rejects a whole batch because one of its tasks names a busy group. That task queues; its read-only siblings, which are the reason the batch was parallel, run immediately.
 
 ## Output caps
 

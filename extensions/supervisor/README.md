@@ -85,10 +85,12 @@ Before editing, the worker checks that its assignment is a coherent leaf with ev
 The worker declares the `workspace-writer` concurrency group. The subagent extension:
 
 - rejects parallel requests containing multiple agents from that group;
-- rejects overlapping worker launches from separate simultaneous tool calls;
+- serializes overlapping worker launches from separate simultaneous tool calls, queuing the second until the first finishes rather than failing it;
 - rejects any chain containing an agent from that group;
 - allows one worker alongside parallel read-only agents;
-- releases the group after success, failure, or abort.
+- releases the group after success, failure, or abort, but does not pass it to a queued worker when the previous child outlived its run and may still be editing.
+
+Queuing keeps two workers from editing at once; it does not make launching two of them correct. The supervisor is still required to inspect and verify each package before delegating the next, and a queued second worker was written against a workspace the first one has since changed.
 
 The supervisor workflow requires a separate single call for every worker package so the main agent must inspect and verify each result. The subagent tool enforces the no-worker-chain rule: a chain naming `worker` is refused before any child starts, with a message directing the supervisor to separate single calls.
 
