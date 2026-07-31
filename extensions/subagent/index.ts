@@ -38,11 +38,13 @@ import {
 } from "./process-control.ts";
 import { OutputOverflowStore } from "./overflow.ts";
 import { discoverExtensionAgents } from "./protocol.ts";
+import { findDuplicateSessionKey, SubagentSessionStore } from "./session-store.ts";
 import {
 	type DisplayItem,
 	describeFailure,
 	emptyUsage,
 	failureResult,
+	formatSessionNote,
 	getDisplayItems,
 	getFinalOutput,
 	getResultOutput,
@@ -243,6 +245,9 @@ async function runSingleAgent(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	concurrencyGate: AgentConcurrencyGate,
+	sessionKey: string | undefined,
+	sessions: SubagentSessionStore,
+	sessionGate: AgentConcurrencyGate,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -269,13 +274,20 @@ async function runSingleAgent(
 		});
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session", "--exclude-tools", "subagent"];
+	// Session flags are decided below, once the store has answered; everything before that point is
+	// identical between runs of one session, which is what lets the provider cache the prefix.
+	const args: string[] = ["--mode", "json", "-p", "--exclude-tools", "subagent"];
 	if (agent.model) args.push("--model", agent.model);
 	if (agent.thinking) args.push("--thinking", agent.thinking);
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
+	let releaseSession: (() => void) | undefined;
+	// Set on the paths that stop waiting for a child that has not exited. Its session file is still
+	// open to it, so the lock on that session must not come back. Read in the `finally`, hence out
+	// here rather than beside the run it belongs to.
+	let childOutlivedRun = false;
 
 	const currentResult: SingleResult = {
 		agent: agentName,
@@ -301,6 +313,32 @@ async function runSingleAgent(
 	const workingDir = cwd ?? defaultCwd;
 
 	try {
+		const session = sessionKey ? await sessions.resolve({ agent: agent.name, cwd: workingDir, sessionKey }) : undefined;
+		if (sessionKey && session) {
+			// Two children writing one session file would interleave their histories into something
+			// neither of them wrote.
+			releaseSession = sessionGate.tryAcquire(session.id);
+			if (!releaseSession) {
+				return failureResult({
+					agent: agent.name,
+					agentSource: agent.source,
+					task,
+					step,
+					model: agent.model,
+					message: `Subagent session "${sessionKey}" is already in use by a running ${agent.name}. Wait for it to finish, or use a different sessionKey.`,
+				});
+			}
+			args.push("--session-id", session.id, "--session-dir", session.dir);
+			currentResult.session = { key: sessionKey, run: session.begin() };
+		} else {
+			args.push("--no-session");
+			// A key that could not be given a session leaves the child with none, and the parent asked
+			// for continuity precisely because its task text assumes it — a delta that names work the
+			// child is supposed to already remember. Recording the key without a run number makes the
+			// result say so rather than let the parent read a confused reply as the agent's judgement.
+			if (sessionKey) currentResult.session = { key: sessionKey };
+		}
+
 		if (agent.systemPrompt.trim()) {
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
@@ -390,7 +428,10 @@ async function runSingleAgent(
 			// agent's concurrency group with it.
 			const abandonAfter = (delayMs: number) => {
 				if (settled || abandonTimer) return;
-				abandonTimer = setTimeout(() => finish(1), delayMs);
+				abandonTimer = setTimeout(() => {
+					childOutlivedRun = true;
+					finish(1);
+				}, delayMs);
 				abandonTimer.unref?.();
 			};
 
@@ -419,7 +460,12 @@ async function runSingleAgent(
 				killProc = () => {
 					if (wasAborted || settled) return;
 					wasAborted = true;
-					cancelEscalation = terminateWithEscalation(proc, { onUnterminated: () => finish(1) });
+					cancelEscalation = terminateWithEscalation(proc, {
+						onUnterminated: () => {
+							childOutlivedRun = true;
+							finish(1);
+						},
+					});
 				};
 				if (signal.aborted) killProc();
 				else signal.addEventListener("abort", killProc, { once: true });
@@ -442,6 +488,12 @@ async function runSingleAgent(
 		}
 		return currentResult;
 	} finally {
+		// Deliberately not released when the child outlived the run: it still has the session file
+		// open, and a second pi appending to the same file would interleave two histories into one
+		// neither of them wrote. Holding the key costs the parent a session; releasing it costs the
+		// transcript. The concurrency group is released either way, as it always was — waiting on a
+		// process that may never exit would block the agent for the rest of the conversation.
+		if (!childOutlivedRun) releaseSession?.();
 		releaseConcurrency();
 		if (tmpPromptPath)
 			try {
@@ -458,16 +510,21 @@ async function runSingleAgent(
 	}
 }
 
+const SESSION_KEY_DESCRIPTION =
+	"Optional label that reuses a prior child session. Two calls to the same agent with the same sessionKey share one context: the second starts already holding what the first read and concluded, so its task can be a short delta instead of a full re-briefing. Use it for successive tasks on the same code; omit it to start fresh, which is the default and the right choice for unrelated work. Sessions are separate per agent and per working directory, last only for this conversation, and cannot be used by two runs at once.";
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	sessionKey: Type.Optional(Type.String({ description: SESSION_KEY_DESCRIPTION })),
 });
 
 const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+	sessionKey: Type.Optional(Type.String({ description: SESSION_KEY_DESCRIPTION })),
 });
 
 const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
@@ -485,10 +542,15 @@ const SubagentParams = Type.Object({
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: true.", default: true }),
 	),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
+	sessionKey: Type.Optional(Type.String({ description: `${SESSION_KEY_DESCRIPTION} (single mode)` })),
 });
 
 export default function (pi: ExtensionAPI) {
 	const concurrencyGate = new AgentConcurrencyGate();
+	// Keyed by session id rather than by agent, so unrelated sessions of the same agent stay free to
+	// run while one of them is busy.
+	const sessionGate = new AgentConcurrencyGate();
+	const sessions = new SubagentSessionStore();
 	// Caps what reaches the parent's context in every mode. Parallel fans out and was capped from the
 	// start, but a single worker report or chain step lands in the same context window and had none.
 	const overflow = new OutputOverflowStore();
@@ -501,12 +563,13 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const reportForParent = async (result: SingleResult): Promise<string> => {
 		const capped = await overflow.capForParent(result.agent, getResultOutput(result));
-		const observed = formatWorkspaceReport(result.workspace);
-		return observed ? `${capped}\n\n${observed}` : capped;
+		const trailer = [formatWorkspaceReport(result.workspace), formatSessionNote(result, formatTokens)].filter(Boolean);
+		return trailer.length > 0 ? `${capped}\n\n${trailer.join("\n\n")}` : capped;
 	};
 
 	pi.on("session_shutdown", () => {
 		overflow.dispose();
+		sessions.dispose();
 	});
 
 	pi.registerTool({
@@ -515,6 +578,7 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate substantial codebase exploration to the scout agent, independent code review to the reviewer agent, and broader web research to the researcher agent.",
 			"Every child starts with fresh isolated context and does not automatically receive the parent conversation or context from prior subagent invocations; share context explicitly in the task, including with chain mode's {previous} placeholder.",
+			"The exception is sessionKey: repeating it sends a follow-up task to the same child, which still cannot see the parent conversation but does keep everything from its own earlier runs.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder). Agents that mutate the workspace cannot run in chain mode; give each one its own single call so you can inspect its result before delegating the next task.",
 			"Long agent output is capped; when it is, the result ends with a notice giving the path to a file holding the full text, which you can read if the omitted part matters.",
 			"Results for agents that change files end with an \"Observed workspace changes\" section measured by this tool rather than reported by the agent; reconcile it against what the agent claims it changed.",
@@ -650,6 +714,9 @@ export default function (pi: ExtensionAPI) {
 							chainUpdate,
 							makeDetails("chain"),
 							concurrencyGate,
+							step.sessionKey,
+							sessions,
+							sessionGate,
 						),
 					);
 					results.push(result);
@@ -697,6 +764,19 @@ export default function (pi: ExtensionAPI) {
 							type: "text",
 							text: `Parallel tasks cannot include multiple agents from concurrency group "${concurrencyConflict}". Run editing workers sequentially.`,
 						}],
+						details: makeDetails("parallel")([]),
+						isError: true,
+					};
+				}
+				const duplicateSessionKey = findDuplicateSessionKey(params.tasks, ctx.cwd);
+				if (duplicateSessionKey) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Parallel tasks cannot share sessionKey "${duplicateSessionKey}" for the same agent and working directory: one session cannot hold two runs at once. Give them different keys, or run them sequentially.`,
+							},
+						],
 						details: makeDetails("parallel")([]),
 						isError: true,
 					};
@@ -765,6 +845,9 @@ export default function (pi: ExtensionAPI) {
 							},
 							makeDetails("parallel"),
 							concurrencyGate,
+							t.sessionKey,
+							sessions,
+							sessionGate,
 						),
 					);
 					allResults[index] = result;
@@ -807,6 +890,9 @@ export default function (pi: ExtensionAPI) {
 						onUpdate,
 						makeDetails("single"),
 						concurrencyGate,
+						params.sessionKey,
+						sessions,
+						sessionGate,
 					),
 				);
 				const isError = isFailedResult(result);

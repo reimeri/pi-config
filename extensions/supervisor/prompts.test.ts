@@ -29,6 +29,9 @@ describe("supervisor agent prompts", () => {
 		expect(worker?.systemPrompt).toContain("## Suggested Split");
 		expect(worker?.systemPrompt).toContain("## Acceptance Criteria");
 		expect(worker?.systemPrompt).toContain("Do not continue into a likely next task");
+		// A resumed worker carries its own earlier suggestions, which must not read as authority.
+		expect(worker?.systemPrompt).toContain("You may be resumed with your earlier tasks still in context");
+		expect(worker?.systemPrompt).toContain("An earlier Recommended Next Task is not an assignment");
 	});
 
 	test("reviewer supports pre-implementation specification review", () => {

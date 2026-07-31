@@ -32,6 +32,29 @@ export interface SingleResult {
 	step?: number;
 	/** Working-tree changes observed around the run, for agents that opt in. */
 	workspace?: WorkspaceReport;
+	/** Reused child session, when the call supplied a sessionKey. No `run` means none could be made. */
+	session?: { key: string; run?: number };
+}
+
+/**
+ * The note telling the parent how far a reused session has grown.
+ *
+ * A resumed child accumulates context across runs, so the parent needs to see that number to know
+ * when a sequence has gone on long enough to warrant a fresh key — otherwise the first sign is the
+ * run that stops against its output limit.
+ *
+ * A key with no run number is one the tool could not honour. That has to be said out loud: the
+ * parent wrote its task as a delta against context the child turns out not to have, so a reply that
+ * misses the point is the tool's doing rather than the agent's.
+ */
+export function formatSessionNote(result: SingleResult, formatTokens: (count: number) => string): string {
+	if (!result.session) return "";
+	const { key, run } = result.session;
+	if (run === undefined)
+		return `[Subagent session "${key}" was unavailable, so this run started with fresh context and kept nothing from earlier runs. Anything the task assumed the agent already knew has to be restated.]`;
+	const context = result.usage.contextTokens;
+	const size = context > 0 ? `, child context ~${formatTokens(context)} tokens` : "";
+	return `[Subagent session "${key}", run ${run}${size}.]`;
 }
 
 export type DisplayItem =

@@ -57,6 +57,8 @@ describe("supervisorInstructions", () => {
 	test("retains bash, concurrency, review, and mode-composition guidance", () => {
 		const prompt = supervisorInstructions();
 		expect(prompt).toContain("Never launch more than one worker concurrently");
+		expect(prompt).toContain("Pass sessionKey when the next leaf continues work");
+		expect(prompt).toContain("Omit sessionKey for unrelated leaves");
 		expect(prompt).toContain("use reviewer to critique the implementation specification");
 		expect(prompt).toContain("Worker verifies its assigned leaf with targeted checks");
 		expect(prompt).toContain("supervisor independently inspects or confirms");

@@ -58,6 +58,36 @@ Chain mode rejects any agent that declares a concurrency group, including a chai
 
 Children run as ephemeral JSON-mode Pi processes. Every invocation starts with fresh context and does not automatically receive the parent conversation or context from prior subagent invocations. Context must be supplied explicitly in the task, including through chain mode's `{previous}` placeholder. Task text must therefore be self-contained. Follow-up tasks should carry forward the relevant prior findings, affected paths or symbols, failure scenarios, expected resolution, and acceptance criteria rather than assuming agent memory; quote prior output when exact details matter. The `subagent` tool is explicitly disabled in children to prevent recursive delegation.
 
+## Reusable sessions
+
+By default a child runs with `--no-session`, so two tasks sent to the same agent share nothing and the second re-reads what the first read. An optional `sessionKey` on any mode's item gives the run a session file to resume:
+
+```json
+{ "agent": "worker", "task": "...", "sessionKey": "queue-refactor" }
+```
+
+The next call with the same key resumes that child's conversation, so it starts already holding what it read and concluded, and the new task can be a delta instead of a full re-briefing. Every result carrying a session ends with a note giving the run number and the child's context size:
+
+```
+[Subagent session "queue-refactor", run 3, child context ~48k tokens.]
+```
+
+Sessions are:
+
+- **scoped** to one agent, one working directory, and one parent session. A key reused across agents or checkouts starts a separate session rather than resuming a history the resuming agent would read as its own past work;
+- **ephemeral**, living in a temp directory removed at session shutdown. They make a sequence of related tasks cheap; they are not agent memory;
+- **exclusive**, since two children writing one session file would interleave their histories. A parallel batch repeating a key is rejected before any child starts, and a session already in use fails the second run. A child that outlives its run — one that survived termination, or whose run was abandoned after a handle error — keeps its key for the rest of the conversation, because the file is still open to it.
+
+A key the tool cannot honour, because no temp directory could be made, does not fail the run: the child runs without a session, and the note says the session was unavailable instead of giving a run number. That matters to the parent rather than to the child, since the task was likely written as a delta against context the child now does not have.
+
+Reuse trades isolation for cost. A resumed agent arrives holding its earlier assignments, its own suggestions about what to do next, and any wrong turns it took, so it suits successive tasks on the same code and not unrelated work. Context also accumulates across runs, and a session left to grow will eventually stop against the output limit — which is reported as a `length` failure. The run number and context size in the note are there to show when to start a new key.
+
+### Prompt caching
+
+Reuse only pays off if the repeated prefix stays byte-identical, so the tool keeps its own inputs stable: the model, thinking level, tool list, and agent prompt all come from the agent Markdown, and the session flags are the only arguments that differ between a fresh run and a resumed one. Pi's own system prompt is built from the tool list, agent prompt, context files, and cwd, with no clock or environment block in it, so it does not vary on its own between calls.
+
+What does change the prefix, and so costs a cache read: editing the agent's Markdown, editing `AGENTS.md`/`CLAUDE.md`, or changing the agent's tools. Those are real changes to what the child is, and re-sending is correct. Nothing that happens in the *parent* conversation between two calls affects a child's prefix.
+
 ## Concurrency groups
 
 An agent may declare `concurrency: <group>` in its frontmatter. Within one parent Pi process:

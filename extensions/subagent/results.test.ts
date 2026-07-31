@@ -2,7 +2,9 @@ import type { AssistantMessage, Message, StopReason, ToolCall } from "@earendil-
 import { describe, expect, test } from "vitest";
 import {
 	describeFailure,
+	emptyUsage,
 	failureResult,
+	formatSessionNote,
 	getDisplayItems,
 	getFinalOutput,
 	getResultOutput,
@@ -151,5 +153,38 @@ describe("failureResult", () => {
 		expect(isFailedResult(failure)).toBe(true);
 		expect(getResultOutput(failure)).toBe("spawn E2BIG");
 		expect(failure.step).toBe(2);
+	});
+});
+
+describe("formatSessionNote", () => {
+	const tokens = (count: number) => `${Math.round(count / 1000)}k`;
+	const withSession = (session: SingleResult["session"], contextTokens = 0): SingleResult => ({
+		agent: "worker",
+		agentSource: "user",
+		task: "t",
+		exitCode: 0,
+		messages: [],
+		stderr: "",
+		usage: { ...emptyUsage(), contextTokens },
+		session,
+	});
+
+	test("says nothing for a run that asked for no session", () => {
+		expect(formatSessionNote(withSession(undefined), tokens)).toBe("");
+	});
+
+	test("reports the run number and the child's context size", () => {
+		expect(formatSessionNote(withSession({ key: "auth", run: 3 }, 48000), tokens)).toBe(
+			'[Subagent session "auth", run 3, child context ~48k tokens.]',
+		);
+	});
+
+	test("tells the parent when the key could not be honoured", () => {
+		// The parent wrote its task as a delta against context the child turns out not to have, so
+		// silence here would let a reply that misses the point read as the agent's own judgement.
+		const note = formatSessionNote(withSession({ key: "auth" }), tokens);
+		expect(note).toContain('"auth" was unavailable');
+		expect(note).toContain("fresh context");
+		expect(note).not.toContain("undefined");
 	});
 });

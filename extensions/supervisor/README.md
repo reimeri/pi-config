@@ -60,6 +60,14 @@ While supervisor mode is enabled, the extension contributes `worker.md` to the s
 - has `diff: true`, so every result carries an observed change list;
 - is unavailable when supervisor mode is disabled.
 
+## Worker sessions
+
+Successive leaves often land in the same subsystem, and a fresh worker re-reads all of it every time. Passing `sessionKey` on the subagent call resumes the previous worker's context, so it keeps what it already read and the new assignment can cover only what changed.
+
+The supervisor decides per call. Reuse a key while leaves continue on the same code; omit it for unrelated work; start a new key when the plan moves to another subsystem or the reported child context has grown large. Each result ends with the session's run number and context size so that judgement has something to go on.
+
+The full contract still applies to every leaf. A resumed worker knows what it did before, not what it is allowed to do now, and `worker.md` tells it to treat its own history as background and its earlier `Recommended Next Task` as a suggestion rather than an assignment.
+
 ## Observed workspace changes
 
 Every worker result ends with an `Observed workspace changes` section produced by the subagent tool from `git` snapshots taken around the run, not by worker itself. It lists the files that actually moved, with line counts, and flags a HEAD move.
