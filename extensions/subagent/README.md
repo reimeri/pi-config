@@ -51,6 +51,8 @@ The model should use `provider/model` syntax. Agent definitions are read fresh f
 - Parallel: `{ "tasks": [{ "agent": "scout", "task": "..." }, { "agent": "researcher", "task": "..." }] }`
 - Chain: `{ "chain": [{ "agent": "researcher", "task": "..." }, { "agent": "reviewer", "task": "Review these findings: {previous}" }] }`
 
+Chain mode rejects any agent that declares a concurrency group, including a chain containing only one. Editing agents run as separate single calls so the parent inspects each result before the next task starts.
+
 Children run as ephemeral JSON-mode Pi processes. Every invocation starts with fresh context and does not automatically receive the parent conversation or context from prior subagent invocations. Context must be supplied explicitly in the task, including through chain mode's `{previous}` placeholder. Task text must therefore be self-contained. Follow-up tasks should carry forward the relevant prior findings, affected paths or symbols, failure scenarios, expected resolution, and acceptance criteria rather than assuming agent memory; quote prior output when exact details matter. The `subagent` tool is explicitly disabled in children to prevent recursive delegation.
 
 ## Concurrency groups
@@ -59,8 +61,22 @@ An agent may declare `concurrency: <group>` in its frontmatter. Within one paren
 
 - only one child from a group may run at a time, including across simultaneous `subagent` tool calls;
 - a parallel request containing the same group more than once is rejected before any child starts;
+- a chain containing a grouped agent is rejected before any child starts;
 - agents without a group retain normal parallel behavior;
-- sequential chain steps may reuse a group;
 - the group is released when the child succeeds, fails, or is aborted.
 
 The supervisor worker uses `workspace-writer`, preventing concurrent edits in the same checkout. This is not a cross-process or filesystem lock.
+
+The chain rule is about checkpoints rather than overlap. Chain steps are sequential, so they never race; the problem is that a chain would run several editing packages back to back with the parent seeing only the last one's output, skipping the diff inspection and verification that are supposed to happen between them.
+
+## Output caps
+
+Every mode caps the text handed back to the parent at 50 KB per agent. The kept portion is cut on a character boundary and followed by a notice giving the byte count that was dropped and the path to a file holding the full output. That file lives in a per-session temp directory and is removed at session shutdown, so the parent can read the remainder on a later turn but the text does not accumulate across sessions. If the file cannot be written the cap still applies and the notice points at the tool details instead.
+
+Chain mode's `{previous}` placeholder passes the previous step's output uncapped: it feeds the next child, not the parent's context.
+
+## Failure reporting
+
+A run is a failure when the child exits non-zero, or its final stop reason is `error`, `aborted`, or `length`. `length` means the child was cut off by its output limit mid-run, which exits 0 and would otherwise be reported as a completed task.
+
+Aborted and truncated runs keep whatever the child produced. Their trailing text is labelled as partial rather than returned as the agent's report, because a child that stops mid-run ends on whatever it was narrating and that reads exactly like a completion report. Aborting no longer discards the run: an editing agent may already have changed files, and its message list is the only record of which ones. In parallel mode one task's failure or abort no longer discards its siblings' finished work.

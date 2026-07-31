@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 import type { AgentConfig } from "./agents.ts";
-import { AgentConcurrencyGate, findParallelConcurrencyConflict } from "./concurrency.ts";
+import {
+	AgentConcurrencyGate,
+	findChainConcurrencyConflicts,
+	findParallelConcurrencyConflict,
+} from "./concurrency.ts";
 
 function agent(name: string, concurrencyGroup?: string): AgentConfig {
 	return {
@@ -47,5 +51,35 @@ describe("findParallelConcurrencyConflict", () => {
 
 	test("allows parallel read-only agents", () => {
 		expect(findParallelConcurrencyConflict(agents, ["scout", "reviewer"])).toBeUndefined();
+	});
+});
+
+describe("findChainConcurrencyConflicts", () => {
+	const agents = [agent("worker", "workspace-writer"), agent("scout"), agent("reviewer")];
+
+	test("rejects a lone editing step, which would skip the parent's checkpoint", () => {
+		expect(findChainConcurrencyConflicts(agents, ["worker"])).toEqual([
+			{ agent: "worker", group: "workspace-writer" },
+		]);
+	});
+
+	test("rejects an editing step chained behind read-only work", () => {
+		expect(findChainConcurrencyConflicts(agents, ["scout", "worker"])).toEqual([
+			{ agent: "worker", group: "workspace-writer" },
+		]);
+	});
+
+	test("reports each conflicting agent once", () => {
+		expect(findChainConcurrencyConflicts(agents, ["worker", "worker", "scout"])).toEqual([
+			{ agent: "worker", group: "workspace-writer" },
+		]);
+	});
+
+	test("allows chains of ungrouped agents", () => {
+		expect(findChainConcurrencyConflicts(agents, ["scout", "reviewer"])).toEqual([]);
+	});
+
+	test("ignores unknown agent names, which the run itself reports", () => {
+		expect(findChainConcurrencyConflicts(agents, ["nope"])).toEqual([]);
 	});
 });

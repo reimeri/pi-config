@@ -28,16 +28,27 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type AgentConfig, type AgentScope, type AgentSource, discoverAgents } from "./agents.ts";
-import { AgentConcurrencyGate, findParallelConcurrencyConflict } from "./concurrency.ts";
+import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { AgentConcurrencyGate, findChainConcurrencyConflicts, findParallelConcurrencyConflict } from "./concurrency.ts";
 import { LineStream } from "./line-stream.ts";
 import {
 	CHILD_TERMINATION_GRACE_MS,
 	shouldFinishOnChildError,
 	terminateWithEscalation,
 } from "./process-control.ts";
+import { OutputOverflowStore } from "./overflow.ts";
 import { discoverExtensionAgents } from "./protocol.ts";
-import { truncateParallelOutput } from "./truncate.ts";
+import {
+	type DisplayItem,
+	describeFailure,
+	emptyUsage,
+	failureResult,
+	getDisplayItems,
+	getFinalOutput,
+	getResultOutput,
+	isFailedResult,
+	type SingleResult,
+} from "./results.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -144,31 +155,6 @@ function formatToolCall(
 	}
 }
 
-interface UsageStats {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	cost: number;
-	contextTokens: number;
-	turns: number;
-}
-
-interface SingleResult {
-	agent: string;
-	agentSource: AgentSource | "unknown";
-	task: string;
-	exitCode: number;
-	messages: Message[];
-	stderr: string;
-	usage: UsageStats;
-	model?: string;
-	stopReason?: string;
-	errorMessage?: string;
-	failureKind?: "concurrency";
-	step?: number;
-}
-
 interface SubagentDetails {
 	mode: "single" | "parallel" | "chain";
 	agentScope: AgentScope;
@@ -176,42 +162,18 @@ interface SubagentDetails {
 	results: SingleResult[];
 }
 
-function getFinalOutput(messages: Message[]): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const msg = messages[i];
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
-			}
-		}
+/** Turn a thrown spawn/setup failure into a reportable result instead of losing the whole call. */
+async function runSafely(
+	agent: string,
+	task: string,
+	step: number | undefined,
+	run: () => Promise<SingleResult>,
+): Promise<SingleResult> {
+	try {
+		return await run();
+	} catch (error) {
+		return failureResult({ agent, task, step, message: error instanceof Error ? error.message : String(error) });
 	}
-	return "";
-}
-
-function isFailedResult(result: SingleResult): boolean {
-	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
-}
-
-function getResultOutput(result: SingleResult): string {
-	if (isFailedResult(result)) {
-		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-	}
-	return getFinalOutput(result.messages) || "(no output)";
-}
-
-type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, any> };
-
-function getDisplayItems(messages: Message[]): DisplayItem[] {
-	const items: DisplayItem[] = [];
-	for (const msg of messages) {
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") items.push({ type: "text", text: part.text });
-				else if (part.type === "toolCall") items.push({ type: "toolCall", name: part.name, args: part.arguments });
-			}
-		}
-	}
-	return items;
 }
 
 async function mapWithConcurrencyLimit<TIn, TOut>(
@@ -278,32 +240,25 @@ async function runSingleAgent(
 
 	if (!agent) {
 		const available = agents.map((a) => `"${a.name}"`).join(", ") || "none";
-		return {
+		return failureResult({
 			agent: agentName,
-			agentSource: "unknown",
 			task,
-			exitCode: 1,
-			messages: [],
-			stderr: `Unknown agent: "${agentName}". Available agents: ${available}.`,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 			step,
-		};
+			message: `Unknown agent: "${agentName}". Available agents: ${available}.`,
+		});
 	}
 
 	const releaseConcurrency = concurrencyGate.tryAcquire(agent.concurrencyGroup);
 	if (!releaseConcurrency) {
-		return {
+		return failureResult({
 			agent: agent.name,
 			agentSource: agent.source,
 			task,
-			exitCode: 1,
-			messages: [],
-			stderr: `Agent concurrency group "${agent.concurrencyGroup}" is already active. Wait for the current worker to finish.`,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			step,
 			model: agent.model,
 			failureKind: "concurrency",
-			step,
-		};
+			message: `Agent concurrency group "${agent.concurrencyGroup}" is already active. Wait for the current worker to finish.`,
+		});
 	}
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session", "--exclude-tools", "subagent"];
@@ -321,7 +276,7 @@ async function runSingleAgent(
 		exitCode: 0,
 		messages: [],
 		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		usage: emptyUsage(),
 		model: agent.model,
 		step,
 	};
@@ -452,7 +407,14 @@ async function runSingleAgent(
 		});
 
 		currentResult.exitCode = exitCode;
-		if (wasAborted) throw new Error("Subagent was aborted");
+		if (wasAborted) {
+			// Returning the run rather than throwing it away is the whole point: an aborted worker
+			// may already have edited files, and the messages collected so far are the only record
+			// of which ones. A throw here also took every finished sibling in a parallel batch down
+			// with it. `isFailedResult` keeps this an error; a signalled child reports exit code 0.
+			currentResult.stopReason = "aborted";
+			currentResult.errorMessage ??= "Subagent was aborted before it finished.";
+		}
 		return currentResult;
 	} finally {
 		releaseConcurrency();
@@ -502,6 +464,14 @@ const SubagentParams = Type.Object({
 
 export default function (pi: ExtensionAPI) {
 	const concurrencyGate = new AgentConcurrencyGate();
+	// Caps what reaches the parent's context in every mode. Parallel fans out and was capped from the
+	// start, but a single worker report or chain step lands in the same context window and had none.
+	const overflow = new OutputOverflowStore();
+	const capForParent = (agentName: string, text: string) => overflow.capForParent(agentName, text);
+
+	pi.on("session_shutdown", () => {
+		overflow.dispose();
+	});
 
 	pi.registerTool({
 		name: "subagent",
@@ -509,7 +479,8 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate substantial codebase exploration to the scout agent, independent code review to the reviewer agent, and broader web research to the researcher agent.",
 			"Every child starts with fresh isolated context and does not automatically receive the parent conversation or context from prior subagent invocations; share context explicitly in the task, including with chain mode's {previous} placeholder.",
-			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
+			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder). Agents that mutate the workspace cannot run in chain mode; give each one its own single call so you can inspect its result before delegating the next task.",
+			"Long agent output is capped; when it is, the result ends with a notice giving the path to a file holding the full text, which you can read if the omitted part matters.",
 			"Make every task self-contained; for follow-up work, include the relevant prior findings and context instead of assuming the agent remembers them.",
 			`Models, thinking levels, tools, and prompts are configured in agent Markdown files under ${path.join(getAgentDir(), "agents")}.`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
@@ -585,6 +556,27 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.chain && params.chain.length > 0) {
+				const chainConflicts = findChainConcurrencyConflicts(
+					agents,
+					params.chain.map((step) => step.agent),
+				);
+				if (chainConflicts.length > 0) {
+					const named = chainConflicts.map((c) => `${c.agent} (group "${c.group}")`).join(", ");
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`Chain mode cannot include workspace-mutating agents: ${named}. ` +
+									"Run each one as its own single subagent call, so the result of each can be inspected and " +
+									"verified before the next task is delegated.",
+							},
+						],
+						details: makeDetails("chain")([]),
+						isError: true,
+					};
+				}
+
 				const results: SingleResult[] = [];
 				let previousOutput = "";
 
@@ -609,33 +601,41 @@ export default function (pi: ExtensionAPI) {
 							}
 						: undefined;
 
-					const result = await runSingleAgent(
-						ctx.cwd,
-						agents,
-						step.agent,
-						taskWithContext,
-						step.cwd,
-						i + 1,
-						signal,
-						chainUpdate,
-						makeDetails("chain"),
-						concurrencyGate,
+					const result = await runSafely(step.agent, taskWithContext, i + 1, () =>
+						runSingleAgent(
+							ctx.cwd,
+							agents,
+							step.agent,
+							taskWithContext,
+							step.cwd,
+							i + 1,
+							signal,
+							chainUpdate,
+							makeDetails("chain"),
+							concurrencyGate,
+						),
 					);
 					results.push(result);
 
 					const isError = isFailedResult(result);
 					if (isError) {
-						const errorMsg = getResultOutput(result);
+						const errorMsg = await capForParent(step.agent, getResultOutput(result));
 						return {
-							content: [{ type: "text", text: `Chain stopped at step ${i + 1} (${step.agent}): ${errorMsg}` }],
+							content: [
+								{
+									type: "text",
+									text: `Chain stopped at step ${i + 1} (${step.agent}), which ${describeFailure(result)}: ${errorMsg}`,
+								},
+							],
 							details: makeDetails("chain")(results),
 							isError: true,
 						};
 					}
 					previousOutput = getFinalOutput(result.messages);
 				}
+				const last = results[results.length - 1];
 				return {
-					content: [{ type: "text", text: getFinalOutput(results[results.length - 1].messages) || "(no output)" }],
+					content: [{ type: "text", text: await capForParent(last.agent, getResultOutput(last)) }],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -690,7 +690,7 @@ export default function (pi: ExtensionAPI) {
 						exitCode: -1, // -1 = still running
 						messages: [],
 						stderr: "",
-						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+						usage: emptyUsage(),
 					};
 				}
 
@@ -707,24 +707,28 @@ export default function (pi: ExtensionAPI) {
 					}
 				};
 
+				// One task's failure must not discard its siblings' finished work, so each is contained
+				// here rather than allowed to reject the whole batch.
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
-					const result = await runSingleAgent(
-						ctx.cwd,
-						agents,
-						t.agent,
-						t.task,
-						t.cwd,
-						undefined,
-						signal,
-						// Per-task update callback
-						(partial) => {
-							if (partial.details?.results[0]) {
-								allResults[index] = partial.details.results[0];
-								emitParallelUpdate();
-							}
-						},
-						makeDetails("parallel"),
-						concurrencyGate,
+					const result = await runSafely(t.agent, t.task, undefined, () =>
+						runSingleAgent(
+							ctx.cwd,
+							agents,
+							t.agent,
+							t.task,
+							t.cwd,
+							undefined,
+							signal,
+							// Per-task update callback
+							(partial) => {
+								if (partial.details?.results[0]) {
+									allResults[index] = partial.details.results[0];
+									emitParallelUpdate();
+								}
+							},
+							makeDetails("parallel"),
+							concurrencyGate,
+						),
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -732,13 +736,13 @@ export default function (pi: ExtensionAPI) {
 				});
 
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
-				const summaries = results.map((r) => {
-					const output = truncateParallelOutput(getResultOutput(r));
-					const status = isFailedResult(r)
-						? `failed${r.stopReason && r.stopReason !== "end" ? ` (${r.stopReason})` : ""}`
-						: "completed";
-					return `### [${r.agent}] ${status}\n\n${output}`;
-				});
+				const summaries = await Promise.all(
+					results.map(async (r) => {
+						const output = await capForParent(r.agent, getResultOutput(r));
+						const status = isFailedResult(r) ? describeFailure(r) : "completed";
+						return `### [${r.agent}] ${status}\n\n${output}`;
+					}),
+				);
 				return {
 					content: [
 						{
@@ -752,29 +756,33 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task) {
-				const result = await runSingleAgent(
-					ctx.cwd,
-					agents,
-					params.agent,
-					params.task,
-					params.cwd,
-					undefined,
-					signal,
-					onUpdate,
-					makeDetails("single"),
-					concurrencyGate,
+				const agentName = params.agent;
+				const task = params.task;
+				const result = await runSafely(agentName, task, undefined, () =>
+					runSingleAgent(
+						ctx.cwd,
+						agents,
+						agentName,
+						task,
+						params.cwd,
+						undefined,
+						signal,
+						onUpdate,
+						makeDetails("single"),
+						concurrencyGate,
+					),
 				);
 				const isError = isFailedResult(result);
+				const output = await capForParent(result.agent, getResultOutput(result));
 				if (isError) {
-					const errorMsg = getResultOutput(result);
 					return {
-						content: [{ type: "text", text: `Agent ${result.stopReason || "failed"}: ${errorMsg}` }],
+						content: [{ type: "text", text: `Agent ${result.agent} ${describeFailure(result)}.\n\n${output}` }],
 						details: makeDetails("single")([result]),
 						isError: true,
 					};
 				}
 				return {
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
+					content: [{ type: "text", text: output }],
 					details: makeDetails("single")([result]),
 				};
 			}

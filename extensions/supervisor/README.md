@@ -69,12 +69,13 @@ The worker declares the `workspace-writer` concurrency group. The subagent exten
 
 - rejects parallel requests containing multiple agents from that group;
 - rejects overlapping worker launches from separate simultaneous tool calls;
+- rejects any chain containing an agent from that group;
 - allows one worker alongside parallel read-only agents;
 - releases the group after success, failure, or abort.
 
-The underlying subagent engine can reuse a concurrency group in sequential chains, but the supervisor workflow requires a separate single call for every worker package so the main agent must inspect and verify each result. In this first iteration that no-worker-chain rule is behavioral rather than mechanically enforced.
+The supervisor workflow requires a separate single call for every worker package so the main agent must inspect and verify each result. The subagent tool enforces the no-worker-chain rule: a chain naming `worker` is refused before any child starts, with a message directing the supervisor to separate single calls.
 
-Concurrency protection is process-local and prevents overlap, not oversized assignments or missing checkpoints. Supervisor mode intentionally does not implement worktree allocation, cross-process locking, merging, or concurrent editing. Editing workers should remain sequential in the current checkout.
+Concurrency protection is process-local. It prevents overlapping and back-to-back chained workers, not oversized assignments or a supervisor that skips its own inspection. Supervisor mode intentionally does not implement worktree allocation, cross-process locking, merging, or concurrent editing. Editing workers should remain sequential in the current checkout.
 
 ## Mode composition
 
