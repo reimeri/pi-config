@@ -132,6 +132,12 @@ Details:
 - outside a git repository, or when git is unavailable or times out, the section says so explicitly rather than implying nothing changed;
 - observation happens while the agent's concurrency group is still held, so another run of that group cannot move the tree between the two snapshots. Two capture-enabled agents in *different* groups running in parallel would each attribute the other's changes to itself.
 
+## What a result stores
+
+The tool result carries the child's assistant turns so the collapsed and expanded views, and the HTML export, can be re-rendered later from the session file. Only what those renderers read is kept: assistant text and tool calls. Reasoning blocks and tool results are dropped as the stream arrives, since nothing reads them and they were 94% of the stored bytes — in one set of real sessions, 85 MB of 91 MB. A tool *call* is still recorded with its arguments, so a run that was aborted mid-edit still shows which files it had open.
+
+None of this reaches the model, which receives only the result text. It is a session-file, load-time, and export-time cost rather than a token one.
+
 ## Failure reporting
 
 A run is a failure when the child exits non-zero, or its final stop reason is `error`, `aborted`, or `length`. `length` means the child was cut off by its output limit mid-run, which exits 0 and would otherwise be reported as a completed task.

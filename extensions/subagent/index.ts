@@ -49,6 +49,7 @@ import {
 	getFinalOutput,
 	getResultOutput,
 	isFailedResult,
+	messageForDisplay,
 	type SingleResult,
 } from "./results.ts";
 import {
@@ -377,7 +378,8 @@ async function runSingleAgent(
 
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
-					currentResult.messages.push(msg);
+					const stored = messageForDisplay(msg);
+					if (stored) currentResult.messages.push(stored);
 
 					if (msg.role === "assistant") {
 						currentResult.usage.turns++;
@@ -397,10 +399,9 @@ async function runSingleAgent(
 					emitUpdate();
 				}
 
-				if (event.type === "tool_result_end" && event.message) {
-					currentResult.messages.push(event.message as Message);
-					emitUpdate();
-				}
+				// `tool_result_end` carries the child's tool output, which no renderer reads and which
+				// was the bulk of what every run persisted. The assistant message that requested the
+				// tool is kept, so the call and its arguments still appear.
 			};
 
 			const stdoutLines = new LineStream(processLine);

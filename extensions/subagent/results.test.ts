@@ -9,6 +9,7 @@ import {
 	getFinalOutput,
 	getResultOutput,
 	isFailedResult,
+	messageForDisplay,
 	type SingleResult,
 } from "./results.ts";
 
@@ -134,6 +135,54 @@ describe("getFinalOutput", () => {
 
 	test("returns empty when no assistant message carried text", () => {
 		expect(getFinalOutput([assistant([toolCall("read")])])).toBe("");
+	});
+});
+
+describe("messageForDisplay", () => {
+	test("keeps assistant text and tool calls, which are what gets rendered", () => {
+		const message = assistant([{ type: "text", text: "done" }, toolCall("read", { path: "a.ts" })]);
+		expect(messageForDisplay(message)?.content).toEqual(message.content);
+	});
+
+	test("drops reasoning, which is stored per run and never rendered", () => {
+		const message = assistant([
+			{ type: "thinking", thinking: "a long private deliberation" } as AssistantMessage["content"][number],
+			{ type: "text", text: "done" },
+		]);
+
+		expect(messageForDisplay(message)?.content).toEqual([{ type: "text", text: "done" }]);
+	});
+
+	test("preserves the fields read off an assistant message", () => {
+		const message = assistant([{ type: "text", text: "cut off" }], "length");
+		const stored = messageForDisplay(message);
+
+		expect(stored).toMatchObject({ role: "assistant", stopReason: "length", model: "test-model" });
+	});
+
+	test("drops tool results, whose output no renderer reads", () => {
+		const toolResult: Message = {
+			role: "toolResult",
+			toolCallId: "call-read",
+			toolName: "read",
+			content: [{ type: "text", text: "40KB of file content" }],
+			isError: false,
+			timestamp: 0,
+		};
+
+		expect(messageForDisplay(toolResult)).toBeUndefined();
+	});
+
+	test("leaves nothing that getDisplayItems would have shown", () => {
+		// The filter and the renderers have to agree: anything dropped here must be something
+		// getDisplayItems would have ignored anyway.
+		const message = assistant([
+			{ type: "thinking", thinking: "private" } as AssistantMessage["content"][number],
+			{ type: "text", text: "visible" },
+			toolCall("grep", { pattern: "x" }),
+		]);
+
+		expect(getDisplayItems([message])).toEqual(getDisplayItems([messageForDisplay(message) as Message]));
 	});
 });
 
