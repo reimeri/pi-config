@@ -120,6 +120,16 @@ The same queue governs `sessionKey`, whose keys are session ids rather than grou
 
 Parallel mode no longer rejects a whole batch because one of its tasks names a busy group. That task queues; its read-only siblings, which are the reason the batch was parallel, run immediately.
 
+## Task delivery
+
+A task is normally one command-line argument. Every OS caps how large a single argument may be — 128 KB on Linux, and a hard 32767-character limit on the *whole* command line on Windows — and past that the spawn fails with `E2BIG` before the child exists. That was a failure the parent could do nothing about: the task had already been written, and the tool was simply refusing to carry it.
+
+Tasks over 64 KB (8 KB on Windows) are written to a file in the run's temp directory and passed as an `@file` argument, which Pi inlines into the child's initial message. The threshold is deliberately well under the OS limit: on Linux the rest of the argument list and the entire environment share the same budget, and the limit counts bytes while a task is counted in characters, so mostly non-ASCII text is several times larger than its length suggests.
+
+The file carries exactly the text the argument would have, so what the child reads does not change with the delivery. Because Pi presents an `@file` as `<file name="…">…</file>` ahead of the message, a short line follows it saying the file *is* the task rather than reference material handed over beside one. The file is removed when the run ends, except when the run gave up on a child that never exited: that child may still be starting, and pi exits on an `@file` it cannot find.
+
+This matters most for chain mode, whose `{previous}` placeholder substitutes an uncapped previous step's output into the next step's task, and for long handoffs to a resumed session.
+
 ## Output caps
 
 Every mode caps the text handed back to the parent at 50 KB per agent. The kept portion is cut on a character boundary and followed by a notice giving the byte count that was dropped and the path to a file holding the full output. That file lives in a per-session temp directory and is removed at session shutdown, so the parent can read the remainder on a later turn but the text does not accumulate across sessions. If the file cannot be written the cap still applies and the notice points at the tool details instead.

@@ -45,6 +45,7 @@ import {
 import { OutputOverflowStore } from "./overflow.ts";
 import { discoverExtensionAgents } from "./protocol.ts";
 import { findDuplicateSessionKey, SubagentSessionStore } from "./session-store.ts";
+import { planTaskDelivery } from "./task-delivery.ts";
 import {
 	type DisplayItem,
 	describeFailure,
@@ -220,14 +221,37 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	return results;
 }
 
-async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
-	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
-	const safeName = agentName.replace(/[^\w.-]+/g, "_");
-	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
-	await withFileMutationQueue(filePath, async () => {
-		await fs.promises.writeFile(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
-	});
-	return { dir: tmpDir, filePath };
+/**
+ * The files one child run is handed: its system prompt, and its task when that is too large to be a
+ * command-line argument. One directory per run, created only when something needs it and removed
+ * with its contents once the run is done with them.
+ */
+class ChildTempFiles {
+	private dir: string | null = null;
+
+	/** Callers write sequentially within a run, so the lazy directory needs no locking. */
+	async write(name: string, contents: string): Promise<string> {
+		this.dir ??= await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
+		const filePath = path.join(this.dir, name);
+		await withFileMutationQueue(filePath, async () => {
+			await fs.promises.writeFile(filePath, contents, { encoding: "utf-8", mode: 0o600 });
+		});
+		return filePath;
+	}
+
+	remove(): void {
+		if (!this.dir) return;
+		try {
+			// Recursive and forcing, so residue cannot strand the directory: a write that failed after
+			// creating its file leaves one this run never learned the name of, and a file the child
+			// still holds open cannot be unlinked on Windows at all. Either would defeat a plain
+			// `rmdir`, and the leftovers hold the task text.
+			fs.rmSync(this.dir, { recursive: true, force: true });
+		} catch {
+			/* ignore */
+		}
+		this.dir = null;
+	}
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -311,8 +335,7 @@ async function runSingleAgent(
 		});
 	}
 
-	let tmpPromptDir: string | null = null;
-	let tmpPromptPath: string | null = null;
+	const tempFiles = new ChildTempFiles();
 	let releaseSession: (() => void) | undefined;
 	let heldSessionId: string | undefined;
 	// Set on the paths that stop waiting for a child that has not exited. Its session file is still
@@ -415,10 +438,8 @@ async function runSingleAgent(
 		}
 
 		if (agent.systemPrompt.trim()) {
-			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
-			tmpPromptDir = tmp.dir;
-			tmpPromptPath = tmp.filePath;
-			args.push("--append-system-prompt", tmpPromptPath);
+			const safeName = agent.name.replace(/[^\w.-]+/g, "_");
+			args.push("--append-system-prompt", await tempFiles.write(`prompt-${safeName}.md`, agent.systemPrompt));
 		}
 
 		// Taken after the concurrency gate is held and released only in the `finally` below, so no
@@ -431,7 +452,11 @@ async function runSingleAgent(
 			else workspaceCaptureFailure = captured.reason;
 		}
 
-		args.push(`Task: ${task}`);
+		// Last, so a task large enough to need a file is written only once the run is certain to
+		// start — after the gates, and after the workspace snapshot that a failure here would strand.
+		const delivery = planTaskDelivery(task);
+		if (delivery.kind === "file") args.push(`@${await tempFiles.write(delivery.fileName, delivery.contents)}`);
+		args.push(delivery.argument);
 		let wasAborted = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
@@ -580,18 +605,12 @@ async function runSingleAgent(
 			concurrencyGate.dropWaiters(agent.concurrencyGroup);
 		} else releaseSession?.();
 		releaseConcurrency();
-		if (tmpPromptPath)
-			try {
-				fs.unlinkSync(tmpPromptPath);
-			} catch {
-				/* ignore */
-			}
-		if (tmpPromptDir)
-			try {
-				fs.rmdirSync(tmpPromptDir);
-			} catch {
-				/* ignore */
-			}
+		// Both files are read by the child while it starts, so a child that exited is done with them.
+		// One that outlived the run may not have got there yet, and its task arrives as an `@file`,
+		// which pi exits on when it is missing rather than degrading the way an absent
+		// `--append-system-prompt` path does. Deleting them would kill the child this path exists to
+		// let keep working, so they are left for the OS to reap.
+		if (!childOutlivedRun) tempFiles.remove();
 	}
 }
 
