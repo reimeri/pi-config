@@ -37,12 +37,15 @@ thinking: medium
 tools: read, grep, find, ls
 # Optional: prevent overlap with agents using the same group
 concurrency: workspace-writer
+# Optional: observe working-tree changes around each run
+diff: true
 ---
 
 Agent system prompt...
 ```
 
 Supported `thinking` values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+`diff` accepts `true`/`false` (also `on`/`off`, `yes`/`no`) and defaults to on for agents that declare a `concurrency` group.
 The model should use `provider/model` syntax. Agent definitions are read fresh for every tool call, so model and prompt edits do not require `/reload`. Changes to the TypeScript extension itself do require `/reload`.
 
 ## Tool modes
@@ -74,6 +77,30 @@ The chain rule is about checkpoints rather than overlap. Chain steps are sequent
 Every mode caps the text handed back to the parent at 50 KB per agent. The kept portion is cut on a character boundary and followed by a notice giving the byte count that was dropped and the path to a file holding the full output. That file lives in a per-session temp directory and is removed at session shutdown, so the parent can read the remainder on a later turn but the text does not accumulate across sessions. If the file cannot be written the cap still applies and the notice points at the tool details instead.
 
 Chain mode's `{previous}` placeholder passes the previous step's output uncapped: it feeds the next child, not the parent's context.
+
+## Observed workspace changes
+
+For agents with `diff` enabled, the tool snapshots the working tree immediately before the child starts and again after it exits, and appends what changed to the result:
+
+```
+Observed workspace changes (git, /repo):
+- src/queue.ts — modified (+24 -6)
+- src/queue.test.ts — added
+- HEAD moved: a1b2c3d → e4f5a6b
+```
+
+This is produced by the tool, not by the agent, so it is a check on the agent's own report rather than a repeat of it. It catches a completion report that names files it never touched, a report that names none of the files it did, a run that changed nothing at all, and a commit made by an agent that was not asked to commit. The section is appended after the output cap, so it is never the part that gets truncated.
+
+Details:
+
+- snapshots are `git status --porcelain -uall` plus `git diff --numstat`, run with `GIT_OPTIONAL_LOCKS=0` so observing cannot interfere with the checkout;
+- the closing snapshot counts lines against the commit the run started from, not the current one, so a child that commits its own work still has its files listed — as `committed` rather than `modified`;
+- renames are reported as a delete plus an add;
+- line counts are the delta attributable to the run, so a tree that was already dirty does not inflate them;
+- a file already dirty before the run is still detected by its line counts, but a rewrite that adds and removes exactly as much as the edit it replaced does not register. A clean tree before the run — the normal case — has no such blind spot;
+- the report is captured even when the child fails or is aborted, which is when it matters most;
+- outside a git repository, or when git is unavailable or times out, the section says so explicitly rather than implying nothing changed;
+- observation happens while the agent's concurrency group is still held, so another run of that group cannot move the tree between the two snapshots. Two capture-enabled agents in *different* groups running in parallel would each attribute the other's changes to itself.
 
 ## Failure reporting
 

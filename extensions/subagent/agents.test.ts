@@ -42,6 +42,41 @@ describe("agent file loading", () => {
 	});
 });
 
+describe("workspace diff capture", () => {
+	function agentWith(frontmatter: string): ReturnType<typeof loadAgentFromFile> {
+		const dir = mkdtempSync(join(tmpdir(), "pi-agent-diff-"));
+		tempDirs.push(dir);
+		const filePath = join(dir, "agent.md");
+		writeFileSync(filePath, `---\nname: a\ndescription: d\n${frontmatter}---\n\nPrompt.\n`);
+		return loadAgentFromFile(filePath, "user");
+	}
+
+	test("defaults to on for a grouped agent, which is the marker for mutating the checkout", () => {
+		expect(agentWith("concurrency: workspace-writer\n")?.captureDiff).toBe(true);
+	});
+
+	test("defaults to off for an ungrouped agent", () => {
+		expect(agentWith("")?.captureDiff).toBe(false);
+	});
+
+	test("lets an ungrouped agent opt in", () => {
+		for (const value of ["true", "on", "yes", "TRUE"]) {
+			expect(agentWith(`diff: ${value}\n`)?.captureDiff, value).toBe(true);
+		}
+	});
+
+	test("lets a grouped agent opt out", () => {
+		for (const value of ["false", "off", "no"]) {
+			expect(agentWith(`concurrency: workspace-writer\ndiff: ${value}\n`)?.captureDiff, value).toBe(false);
+		}
+	});
+
+	test("falls back to the group default when the value is not recognized", () => {
+		expect(agentWith("concurrency: workspace-writer\ndiff: maybe\n")?.captureDiff).toBe(true);
+		expect(agentWith("diff: maybe\n")?.captureDiff).toBe(false);
+	});
+});
+
 describe("extension agent discovery", () => {
 	test("adds invocation-scoped extension agents even with project-only scope", () => {
 		const filePath = tempAgent();

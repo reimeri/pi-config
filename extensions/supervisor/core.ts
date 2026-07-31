@@ -30,6 +30,7 @@ Worker delegation rules:
 - State decisions precisely. Do not ask worker to choose the "cleanest" design, improve anything "as appropriate," fix unrelated issues, or otherwise broaden or design the task.
 - Use a separate single subagent call for every worker package. Never place worker in a subagent chain. Never launch more than one worker concurrently.
 - After every worker return, inspect the diff, validate consequential claims, run or confirm targeted verification, and update the plan before delegating the next leaf. Do not mark work complete from the report alone.
+- Every worker result ends with an "Observed workspace changes" section produced by the tool, not by worker. Reconcile it against worker's reported Files Changed: investigate paths the report does not mention, a report claiming changes when none were observed, and any HEAD move. Treat it as the file inventory, not as a substitute for reading the diff of consequential edits.
 - Delegate narrowly scoped follow-up fixes instead of editing files yourself. Convert reviewer findings into separate leaf tasks when they are independently fixable; do not forward a large finding list as one remediation package.
 
 Other operating rules:

@@ -29,6 +29,8 @@ export interface AgentConfig {
 	model?: string;
 	thinking?: AgentThinkingLevel;
 	concurrencyGroup?: string;
+	/** Snapshot the working tree around the run and report what actually changed. */
+	captureDiff: boolean;
 	systemPrompt: string;
 	source: AgentSource;
 	sourceId?: string;
@@ -41,6 +43,27 @@ export interface AgentDiscoveryResult {
 }
 
 const CONCURRENCY_GROUP_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+const TRUE_VALUES = new Set(["true", "on", "yes"]);
+const FALSE_VALUES = new Set(["false", "off", "no"]);
+
+/**
+ * Whether to observe workspace changes around this agent's runs.
+ *
+ * A concurrency group already marks the agents that mutate the shared checkout — that is what the
+ * group exists to serialize — so it is also the right default for which runs are worth observing.
+ * `diff:` overrides it in either direction: on for an editing agent that needs no group, off for a
+ * grouped agent whose runs are not about files.
+ */
+function parseCaptureDiff(configured: unknown, concurrencyGroup: string | undefined): boolean {
+	// The frontmatter parser resolves YAML scalars, so `diff: true` arrives as a boolean while
+	// `diff: maybe` arrives as a string. Both reach here despite the declared string record.
+	if (typeof configured === "boolean") return configured;
+	const value = typeof configured === "string" ? configured.trim().toLowerCase() : undefined;
+	if (value && TRUE_VALUES.has(value)) return true;
+	if (value && FALSE_VALUES.has(value)) return false;
+	return Boolean(concurrencyGroup);
+}
 
 export function loadAgentFromFile(
 	filePath: string,
@@ -76,6 +99,7 @@ export function loadAgentFromFile(
 		model: frontmatter.model?.trim() || undefined,
 		thinking,
 		concurrencyGroup,
+		captureDiff: parseCaptureDiff(frontmatter.diff, concurrencyGroup),
 		systemPrompt: body,
 		source,
 		sourceId,

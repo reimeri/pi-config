@@ -11,6 +11,7 @@ function agent(name: string, concurrencyGroup?: string): AgentConfig {
 		name,
 		description: name,
 		concurrencyGroup,
+		captureDiff: Boolean(concurrencyGroup),
 		systemPrompt: "",
 		source: "extension",
 		filePath: `/agents/${name}.md`,

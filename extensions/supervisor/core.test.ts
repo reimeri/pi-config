@@ -50,6 +50,8 @@ describe("supervisorInstructions", () => {
 		}
 		expect(prompt).toContain("Never place worker in a subagent chain");
 		expect(prompt).toContain("After every worker return, inspect the diff");
+		expect(prompt).toContain("Observed workspace changes");
+		expect(prompt).toContain("Reconcile it against worker's reported Files Changed");
 	});
 
 	test("retains bash, concurrency, review, and mode-composition guidance", () => {

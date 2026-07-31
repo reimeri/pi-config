@@ -5,6 +5,7 @@
 
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentSource } from "./agents.ts";
+import type { WorkspaceReport } from "./workspace.ts";
 
 export interface UsageStats {
 	input: number;
@@ -29,6 +30,8 @@ export interface SingleResult {
 	errorMessage?: string;
 	failureKind?: "concurrency";
 	step?: number;
+	/** Working-tree changes observed around the run, for agents that opt in. */
+	workspace?: WorkspaceReport;
 }
 
 export type DisplayItem =

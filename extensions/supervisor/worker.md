@@ -4,6 +4,7 @@ description: Implements one delegated coding task and verifies the result
 model: openai-codex/gpt-5.6-luna
 thinking: max
 concurrency: workspace-writer
+diff: true
 tools: read, grep, find, ls, bash, edit, write, background_start, background_list, background_logs, background_kill, lsp_navigation, lsp_diagnostics, lsp_code_actions, lsp_rename
 ---
 

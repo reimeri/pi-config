@@ -26,7 +26,7 @@ import {
 	getMarkdownTheme,
 	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
 import { AgentConcurrencyGate, findChainConcurrencyConflicts, findParallelConcurrencyConflict } from "./concurrency.ts";
@@ -49,6 +49,14 @@ import {
 	isFailedResult,
 	type SingleResult,
 } from "./results.ts";
+import {
+	buildWorkspaceReport,
+	captureWorkspaceSnapshot,
+	formatWorkspaceReport,
+	summarizeWorkspaceReport,
+	type WorkspaceSnapshot,
+	workspaceReportLines,
+} from "./workspace.ts";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -290,12 +298,24 @@ async function runSingleAgent(
 		}
 	};
 
+	const workingDir = cwd ?? defaultCwd;
+
 	try {
 		if (agent.systemPrompt.trim()) {
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
 			tmpPromptDir = tmp.dir;
 			tmpPromptPath = tmp.filePath;
 			args.push("--append-system-prompt", tmpPromptPath);
+		}
+
+		// Taken after the concurrency gate is held and released only in the `finally` below, so no
+		// second run of the same group can move the tree between these two observations.
+		let workspaceBefore: WorkspaceSnapshot | undefined;
+		let workspaceCaptureFailure: string | undefined;
+		if (agent.captureDiff) {
+			const captured = await captureWorkspaceSnapshot(workingDir);
+			if (captured.ok) workspaceBefore = captured.snapshot;
+			else workspaceCaptureFailure = captured.reason;
 		}
 
 		args.push(`Task: ${task}`);
@@ -407,6 +427,11 @@ async function runSingleAgent(
 		});
 
 		currentResult.exitCode = exitCode;
+		// Deliberately not passed the abort signal: an aborted worker is exactly the case where the
+		// parent most needs to know which files were left changed.
+		if (agent.captureDiff) {
+			currentResult.workspace = await buildWorkspaceReport(workingDir, workspaceBefore, workspaceCaptureFailure);
+		}
 		if (wasAborted) {
 			// Returning the run rather than throwing it away is the whole point: an aborted worker
 			// may already have edited files, and the messages collected so far are the only record
@@ -467,7 +492,18 @@ export default function (pi: ExtensionAPI) {
 	// Caps what reaches the parent's context in every mode. Parallel fans out and was capped from the
 	// start, but a single worker report or chain step lands in the same context window and had none.
 	const overflow = new OutputOverflowStore();
-	const capForParent = (agentName: string, text: string) => overflow.capForParent(agentName, text);
+
+	/**
+	 * What one run contributes to the parent's context: the agent's own report, capped, followed by
+	 * what the tool observed of the workspace. The observation is appended after the cap so it can
+	 * never be the part that gets truncated away — it is small, and it is the part the agent did not
+	 * write itself.
+	 */
+	const reportForParent = async (result: SingleResult): Promise<string> => {
+		const capped = await overflow.capForParent(result.agent, getResultOutput(result));
+		const observed = formatWorkspaceReport(result.workspace);
+		return observed ? `${capped}\n\n${observed}` : capped;
+	};
 
 	pi.on("session_shutdown", () => {
 		overflow.dispose();
@@ -481,6 +517,7 @@ export default function (pi: ExtensionAPI) {
 			"Every child starts with fresh isolated context and does not automatically receive the parent conversation or context from prior subagent invocations; share context explicitly in the task, including with chain mode's {previous} placeholder.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder). Agents that mutate the workspace cannot run in chain mode; give each one its own single call so you can inspect its result before delegating the next task.",
 			"Long agent output is capped; when it is, the result ends with a notice giving the path to a file holding the full text, which you can read if the omitted part matters.",
+			"Results for agents that change files end with an \"Observed workspace changes\" section measured by this tool rather than reported by the agent; reconcile it against what the agent claims it changed.",
 			"Make every task self-contained; for follow-up work, include the relevant prior findings and context instead of assuming the agent remembers them.",
 			`Models, thinking levels, tools, and prompts are configured in agent Markdown files under ${path.join(getAgentDir(), "agents")}.`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
@@ -619,7 +656,7 @@ export default function (pi: ExtensionAPI) {
 
 					const isError = isFailedResult(result);
 					if (isError) {
-						const errorMsg = await capForParent(step.agent, getResultOutput(result));
+						const errorMsg = await reportForParent(result);
 						return {
 							content: [
 								{
@@ -635,7 +672,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const last = results[results.length - 1];
 				return {
-					content: [{ type: "text", text: await capForParent(last.agent, getResultOutput(last)) }],
+					content: [{ type: "text", text: await reportForParent(last) }],
 					details: makeDetails("chain")(results),
 				};
 			}
@@ -738,7 +775,7 @@ export default function (pi: ExtensionAPI) {
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				const summaries = await Promise.all(
 					results.map(async (r) => {
-						const output = await capForParent(r.agent, getResultOutput(r));
+						const output = await reportForParent(r);
 						const status = isFailedResult(r) ? describeFailure(r) : "completed";
 						return `### [${r.agent}] ${status}\n\n${output}`;
 					}),
@@ -773,7 +810,7 @@ export default function (pi: ExtensionAPI) {
 					),
 				);
 				const isError = isFailedResult(result);
-				const output = await capForParent(result.agent, getResultOutput(result));
+				const output = await reportForParent(result);
 				if (isError) {
 					return {
 						content: [{ type: "text", text: `Agent ${result.agent} ${describeFailure(result)}.\n\n${output}` }],
@@ -863,6 +900,27 @@ export default function (pi: ExtensionAPI) {
 				return text.trimEnd();
 			};
 
+			/** Observed workspace changes, listed when expanded and summarized when not. */
+			const workspaceComponents = (result: SingleResult): Component[] => {
+				const summary = summarizeWorkspaceReport(result.workspace);
+				if (!summary) return [];
+				const color = result.workspace?.status === "unavailable" ? "warning" : "accent";
+				const parts: Component[] = [new Text(theme.fg(color, `⌂ ${summary}`), 0, 0)];
+				if (result.workspace?.status === "captured") {
+					for (const line of workspaceReportLines(result.workspace)) {
+						parts.push(new Text(theme.fg("dim", `  ${line}`), 0, 0));
+					}
+				}
+				return parts;
+			};
+
+			const workspaceSummaryLine = (result: SingleResult): string => {
+				const summary = summarizeWorkspaceReport(result.workspace);
+				if (!summary) return "";
+				const color = result.workspace?.status === "unavailable" ? "warning" : "accent";
+				return `\n${theme.fg(color, `⌂ ${summary}`)}`;
+			};
+
 			if (details.mode === "single" && details.results.length === 1) {
 				const r = details.results[0];
 				const isError = isFailedResult(r);
@@ -900,6 +958,11 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 					}
+					const workspaceParts = workspaceComponents(r);
+					if (workspaceParts.length > 0) {
+						container.addChild(new Spacer(1));
+						for (const part of workspaceParts) container.addChild(part);
+					}
 					const usageStr = formatUsageStats(r.usage, r.model);
 					if (usageStr) {
 						container.addChild(new Spacer(1));
@@ -916,6 +979,7 @@ export default function (pi: ExtensionAPI) {
 					text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
 					if (displayItems.length > COLLAPSED_ITEM_COUNT) text += `\n${theme.fg("muted", "(Ctrl+O to expand)")}`;
 				}
+				text += workspaceSummaryLine(r);
 				const usageStr = formatUsageStats(r.usage, r.model);
 				if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
 				return new Text(text, 0, 0);
@@ -985,6 +1049,7 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 
+						for (const part of workspaceComponents(r)) container.addChild(part);
 						const stepUsage = formatUsageStats(r.usage, r.model);
 						if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
 					}
@@ -1009,6 +1074,7 @@ export default function (pi: ExtensionAPI) {
 					text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
 					if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					text += workspaceSummaryLine(r);
 				}
 				const usageStr = formatUsageStats(aggregateUsage(details.results));
 				if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
@@ -1070,6 +1136,7 @@ export default function (pi: ExtensionAPI) {
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
 						}
 
+						for (const part of workspaceComponents(r)) container.addChild(part);
 						const taskUsage = formatUsageStats(r.usage, r.model);
 						if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
 					}
@@ -1096,6 +1163,7 @@ export default function (pi: ExtensionAPI) {
 					if (displayItems.length === 0)
 						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;
+					text += workspaceSummaryLine(r);
 				}
 				if (!isRunning) {
 					const usageStr = formatUsageStats(aggregateUsage(details.results));

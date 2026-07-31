@@ -57,7 +57,16 @@ While supervisor mode is enabled, the extension contributes `worker.md` to the s
 - edits and verifies work in the supplied `cwd` (the main checkout by default);
 - cannot recursively invoke subagents;
 - reports changed files, verification, and blockers;
+- has `diff: true`, so every result carries an observed change list;
 - is unavailable when supervisor mode is disabled.
+
+## Observed workspace changes
+
+Every worker result ends with an `Observed workspace changes` section produced by the subagent tool from `git` snapshots taken around the run, not by worker itself. It lists the files that actually moved, with line counts, and flags a HEAD move.
+
+This is what turns "inspect the diff after every worker return" from an instruction the supervisor may skip into something it receives by default, and it costs no turn. The supervisor prompt requires reconciling it against worker's reported `Files Changed`: paths the report omits, a report claiming changes when none were observed, and any commit are all worth investigating.
+
+It is a file inventory, not a replacement for reading the diff of consequential edits. See the subagent README for what the observation can and cannot detect.
 
 The worker definition is stored beside the extension rather than in `~/.pi/agent/agents`, so it does not become a normal globally discoverable agent.
 

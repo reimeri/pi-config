@@ -10,6 +10,9 @@ describe("supervisor agent prompts", () => {
 		const worker = loadAgentFromFile(workerPath, "extension", "supervisor");
 
 		expect(worker).toBeDefined();
+		// The supervisor is told to reconcile worker's reported files against what the tool observed,
+		// which only happens when the worker agent opts into workspace capture.
+		expect(worker?.captureDiff).toBe(true);
 		expect(worker?.systemPrompt).toContain("## Scope gate");
 		expect(worker?.systemPrompt).toContain("explicit Goal naming one primary, independently reviewable outcome");
 		expect(worker?.systemPrompt).toContain("approved design and relevant background");
