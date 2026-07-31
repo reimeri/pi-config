@@ -1,28 +1,14 @@
 import type { Readable } from "node:stream";
 import { AbstractMessageReader, Disposable, type DataCallback, type Message } from "vscode-jsonrpc/node";
 
-/**
- * Bounds on what may be retained while a frame is still incomplete. There is no separate cap on the
- * number of buffered frames: the parser drains every complete frame from the buffer as soon as it
- * arrives, so at most one incomplete frame is ever held, and these byte limits are what bound it.
- * A count of frames per chunk would only measure throughput, which is not a memory risk.
- */
+// Complete frames drain immediately, so byte limits bound the one buffered incomplete frame.
 export interface ReaderLimits { maxHeaderBytes: number; maxBodyBytes: number }
 
 const SEPARATOR = "\r\n\r\n";
 const INITIAL_CAPACITY = 8 * 1024;
 
 export class BoundedStreamMessageReader extends AbstractMessageReader {
-  /**
-   * Received but unparsed bytes, held as `buffer[start, end)`. Bytes outside that window are
-   * meaningless: past `end` they are stale remnants of earlier frames.
-   *
-   * Extending this with `Buffer.concat` per chunk re-copied everything already held, so a
-   * multi-megabyte response arriving in stream-sized pieces cost time quadratic in its length —
-   * and holding the remainder as a `subarray` pinned the whole backing allocation alive. Consuming
-   * a frame now only advances `start`, and the remainder is slid to the front when the free space
-   * behind `end` runs out, which amortises to one copy per byte received.
-   */
+  /** Retain bytes in [start,end); compact only when needed to avoid repeated copying and backing-buffer retention. */
   private buffer = Buffer.alloc(INITIAL_CAPACITY);
   private start = 0;
   private end = 0;
@@ -75,8 +61,7 @@ export class BoundedStreamMessageReader extends AbstractMessageReader {
     if (required > this.buffer.length) {
       let capacity = this.buffer.length;
       while (capacity < required) capacity *= 2;
-      // The caller has already clamped `incoming` so `required` fits the limits; keep doubling from
-      // overshooting them, while never returning less room than was asked for.
+      // `incoming` is limit-clamped; grow until the requested capacity fits.
       capacity = Math.max(required, Math.min(capacity, this.limits.maxHeaderBytes + this.limits.maxBodyBytes));
       const grown = Buffer.alloc(capacity);
       this.buffer.copy(grown, 0, this.start, this.end);
@@ -91,8 +76,7 @@ export class BoundedStreamMessageReader extends AbstractMessageReader {
   private parse(): void {
     while (this.end > this.start) {
       const separator = this.buffer.indexOf(SEPARATOR, this.start);
-      // `indexOf` searches the whole allocation, so a hit must be shown to lie inside the retained
-      // window; one straddling `end` was matched against stale bytes and is not a real separator.
+      // Reject separators beyond `end`; those bytes are stale buffer contents.
       if (separator < 0 || separator + SEPARATOR.length > this.end) {
         if (this.end - this.start > this.limits.maxHeaderBytes) throw new Error("LSP frame header limit exceeded");
         return;

@@ -1,25 +1,4 @@
-// Superset pi extension v1
-/**
- * Superset Notification Extension for pi
- *
- * Emits Claude-Code-compatible lifecycle hooks to Superset's notify.sh so
- * the host UI gets a "working" indicator (and completion chime) for pi
- * sessions, the same way it does for Claude Code, Codex, etc.
- *
- * Mapping:
- *   pi `before_agent_start`  → Claude `UserPromptSubmit`  → Superset `Start`
- *   pi `tool_execution_end`  → Claude `PostToolUse`       → progress signal
- *   pi `agent_end`           → Claude `Stop`              → completion / chime
- *   pi `session_end`         → Claude `SessionEnd`        → pane icon detach
- *   pi `session_shutdown`    → Claude `Stop`              → cleanup on quit/reload
- *
- * Activates only when running inside a v2 Superset terminal (detected via
- * SUPERSET_TERMINAL_ID). Outside Superset it's a complete no-op. If notify.sh
- * is missing it's also a no-op (Superset uninstalled / never installed).
- *
- * Hook dispatch is fire-and-forget: failures to spawn or curl never
- * affect the agent loop. notify.sh has its own connect/max timeouts.
- */
+/** Send fire-and-forget lifecycle notifications to Superset; elsewhere this is a no-op. */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn } from "node:child_process";
@@ -28,7 +7,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export default function (pi: ExtensionAPI) {
-	// Only activate inside a v2 Superset terminal.
 	if (!process.env.SUPERSET_TERMINAL_ID) return;
 
 	const supersetHome =
@@ -44,32 +22,22 @@ export default function (pi: ExtensionAPI) {
 				env: { ...process.env, SUPERSET_AGENT_ID: "pi" },
 			});
 			child.on("error", () => {
-				/* swallow — never let hook failures affect pi */
+				/* Ignore hook failures. */
 			});
 			child.stdin?.on("error", () => {
-				/* swallow — happens if notify.sh exits before we finish writing */
+				/* Ignore hook failures. */
 			});
 			child.stdin?.end(JSON.stringify({ hook_event_name: eventName }));
 			child.unref();
 		} catch {
-			// spawn() can throw synchronously (EACCES, ENOENT). Stay silent.
+			// spawn() can fail synchronously; keep hook errors out of the agent loop.
 		}
 	};
 
-	// Gate every hook on ctx.hasUI: when this is explicitly false (print
-	// mode `-p`, JSON mode), pi is running as a subagent or non-interactive
-	// helper and should NOT drive Superset's working indicator. Interactive
-	// and RPC sessions (the user-facing ones) have hasUI=true.
-	//
-	// We deliberately check `=== false` rather than `!ctx.hasUI` so that pi
-	// versions older than 0.38.0 (where `hasUI` did not yet exist) still
-	// fire hooks. On those older versions subagent flicker is possible, but
-	// that's a niche regression; on >=0.38.0 the gate works precisely.
+	// Skip only when hasUI is explicitly false; preserve compatibility with older Pi versions.
 	const skip = (ctx: { hasUI?: boolean }) => ctx.hasUI === false;
 
-	// Earliest signal pi is alive in this terminal — pi-mono fires
-	// `session_start` once per session before any prompt arrives, which lets
-	// the host bind the pane icon before the user types.
+	// session_start is the earliest signal that lets Superset bind the pane icon.
 	pi.on("session_start", (_event, ctx) => {
 		if (skip(ctx)) return;
 		fire("SessionStart");
@@ -95,9 +63,7 @@ export default function (pi: ExtensionAPI) {
 		fire("Stop");
 	});
 
-	// Ensure we mark the agent as "stopped" if pi is killed mid-run, so the
-	// Superset working indicator doesn't get stuck on. Fires on Ctrl+C,
-	// SIGTERM, SIGHUP, /quit, /reload, /new, /resume, /fork.
+	// Mark stopped on every shutdown path so the working indicator cannot remain stuck.
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (skip(ctx)) return;
 		fire("Stop");

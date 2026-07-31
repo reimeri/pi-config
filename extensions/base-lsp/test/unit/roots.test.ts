@@ -27,8 +27,7 @@ async function workspace(): Promise<{ root: string; file: string }> {
 
 describe("root detection caching", () => {
   it("serves a repeated rootless answer without re-walking the ancestors", async () => {
-    // A repeated search constructs a fresh result object, while a cache hit returns the original.
-    // Freeze the expiry clock so this assertion is independent of machine and filesystem speed.
+    // Distinguish fresh results from cache hits; freeze time for deterministic expiry.
     const { root, file } = await workspace();
     const detector = new RootDetector(1, () => 1_000_000);
     const definition = server();
@@ -41,8 +40,7 @@ describe("root detection caching", () => {
   });
 
   it("notices a marker created after the rootless answer was cached", async () => {
-    // The reason a miss is not cached outright: creating deno.json must start routing files to the
-    // server without waiting for a config reload. The clock is injected so the window is exact.
+    // A newly created marker must reroute without waiting for config reload.
     const { root, file } = await workspace();
     let now = 1_000_000;
     const detector = new RootDetector(1, () => now);
@@ -51,7 +49,7 @@ describe("root detection caching", () => {
     expect((await detector.find(definition, file, root)).root).toBeUndefined();
     await writeFile(join(root, "a", "deno.json"), "{}\n");
 
-    // Still inside the window, so the cached miss stands.
+    // The miss remains within its TTL.
     now += 4_999;
     expect((await detector.find(definition, file, root)).root).toBeUndefined();
 
@@ -61,9 +59,7 @@ describe("root detection caching", () => {
   });
 
   it("expires a fallback root, which named a directory without matching a marker", async () => {
-    // `workspace` and `file-directory` answers carry a root but found nothing, so they have to age
-    // out like any other markerless answer — otherwise most of the catalog stays rooted at the
-    // boundary for the session even after a marker shows up nearer the file.
+    // Markerless fallback roots must expire or later nearer markers are ignored.
     const { root, file } = await workspace();
     let now = 1_000_000;
     const detector = new RootDetector(1, () => now);
@@ -88,8 +84,7 @@ describe("root detection caching", () => {
     const definition = server();
 
     expect((await detector.find(definition, file, root)).root).toBe(join(root, "a", "b"));
-    // Removing the marker is what distinguishes a retained answer from a repeated walk: only a
-    // cache that never expires positives can still name a directory whose marker is gone.
+    // Positive entries remain cached until explicit invalidation, even after marker removal.
     await rm(marker);
     now += 10 * 60 * 1_000;
     expect((await detector.find(definition, file, root)).root).toBe(join(root, "a", "b"));
@@ -97,9 +92,7 @@ describe("root detection caching", () => {
   });
 
   it("sees a marker straight away once the write that created it is announced", async () => {
-    // The window exists for markers nobody tells us about. A marker the agent writes itself is
-    // announced, and waiting out the window there would report "no server" for a project the very
-    // same turn just created.
+    // TTL covers unseen markers; agent-created markers invalidate immediately.
     const { root, file } = await workspace();
     let now = 1_000_000;
     const detector = new RootDetector(1, () => now);
@@ -205,8 +198,7 @@ describe("root detection caching", () => {
   });
 
   it("leaves answers resolved outside the invalidated subtree alone", async () => {
-    // Only the walks that could climb through the written directory can change, and a write is
-    // frequent enough that clearing wholesale would undo the caching this exists for.
+    // Invalidate only walks affected by the written directory.
     const { root, file } = await workspace();
     let now = 1_000_000;
     const detector = new RootDetector(1, () => now);
@@ -216,7 +208,7 @@ describe("root detection caching", () => {
 
     expect((await detector.find(definition, file, root)).root).toBe(join(root, "a", "b"));
     await rm(marker);
-    // A sibling subtree of the cached answer's start directory: nothing it resolved can be affected.
+    // A sibling subtree cannot affect this cached walk.
     await mkdir(join(root, "elsewhere"), { recursive: true });
     detector.invalidateUnder(join(root, "elsewhere"));
 

@@ -1,22 +1,13 @@
-/**
- * Readiness pattern compilation and window scanning for background jobs.
- *
- * Pure and free of SDK imports so the pattern-safety rules, which are the part
- * that has to hold against a hostile pattern, can be tested directly.
- */
+/** Incrementally matches output with structural and cumulative time limits. */
 
 import type { ReadinessRequest } from "./types.ts";
 
 const READINESS_MATCH_WINDOW = 64 * 1024;
 const READINESS_MATCH_OVERLAP = 2 * 1024;
 
-// Rejecting groups, alternation, and unbounded quantifiers is not sufficient to
-// bound backtracking: adjacent bounded quantifiers multiply. `.{1,900}.{1,900}x`
-// passes every structural check yet needs ~810k attempts per starting offset,
-// which is tens of seconds over a single 64KB window. Bound the product instead.
+// Adjacent bounded quantifiers multiply backtracking; bound their product.
 const MAX_READINESS_BACKTRACKING = 1000;
-// Backstop for anything the static budget still underestimates. Cumulative, so a
-// pattern that is merely slow cannot bleed the agent dry one chunk at a time.
+// Apply a cumulative limit so repeated slow chunks cannot exhaust the agent.
 const READINESS_MATCH_TIME_BUDGET_MS = 250;
 
 export interface ReadinessMatcher {
@@ -33,7 +24,7 @@ export function validateSafeRegex(pattern: string): void {
 	let inCharacterClass = false;
 	let maximumMatchWidth = 0;
 	let previousTokenWidth = 0;
-	// Product of the alternatives each variable-length quantifier can try.
+	// Estimate worst-case attempts from variable-length quantifiers.
 	let backtrackingFactor = 1;
 	const chargeBacktracking = (factor: number): void => {
 		backtrackingFactor *= factor;
@@ -79,8 +70,7 @@ export function validateSafeRegex(pattern: string): void {
 			throw new Error("Readiness regex unbounded quantifiers are not supported; use a bounded range");
 		}
 		if (character === "?") {
-			// Either an optional token or a lazy marker on the preceding quantifier.
-			// Charging both is conservative and keeps the accounting simple.
+			// Charge optional and lazy constructs conservatively.
 			chargeBacktracking(2);
 			continue;
 		}

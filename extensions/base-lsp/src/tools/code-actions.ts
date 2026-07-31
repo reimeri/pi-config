@@ -41,9 +41,7 @@ export function registerCodeActionsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
           let manifest: EditManifest | undefined;
           let normalizationError: string | undefined;
           try {
-            // Resolution is per candidate: a server that answers `null` or nonsense for one action
-            // marks that action malformed and leaves the others intact, which is the whole point of
-            // classifying each candidate separately.
+            // Classify malformed resolution per candidate so one bad action does not discard others.
             if (action.data !== undefined && capabilities.codeActionResolve) {
               const resolved = await source.client.request<CodeAction | null>("codeAction/resolve", action, signal);
               if (!resolved || typeof resolved !== "object" || typeof resolved.title !== "string") throw new Error("codeAction/resolve returned no usable action");
@@ -51,8 +49,7 @@ export function registerCodeActionsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
             }
             if (action.edit) manifest = await normalizeWorkspaceEdit(action.edit, runtime.boundary, capabilities.positionEncoding, runtime.loaded.config.limits, documentVersions, documentSnapshots);
           } catch (error) {
-            // Cancellation and timeouts end the whole request; only a genuine server-data fault
-            // demotes a single candidate.
+            // Cancellation and timeouts fail the request; server-data faults demote one candidate.
             const status = statusFromError(error);
             if (status === "cancelled" || status === "timed_out") throw error;
             normalizationError = error instanceof Error ? error.message : String(error);
@@ -71,9 +68,7 @@ export function registerCodeActionsTool(pi: ExtensionAPI, getRuntime: RuntimeGet
           const matches = candidates.filter((candidate) => candidate.actionId === params.actionId);
           if (matches.length !== 1) throw new Error("Fresh code-action response did not contain exactly one matching actionId");
           const selected = matches[0]!; if (!selected.supported || !selected.manifest) throw new Error(selected.reason ?? "Action cannot be applied");
-          // Consumed only once the edit is on disk. Burning the token on a transient failure — an
-          // unavailable server, a stale revalidation — would force a needless second preview of an
-          // action that was never applied.
+          // Consume only after applying; transient failures leave the preview reusable.
           const changed = await applyManifest(selected.manifest, signal); runtime.previewActions.delete(selected.actionId);
           for (const path of changed) { runtime.changed.add(path); await runtime.manager.syncActiveFile(path, signal, true); }
           return envelope(`Applied ${selected.action.title} to ${changed.length} file(s).`, { ...baseDetails("code_actions", "ok", started), server: source.route.server.id, root: source.route.root, actionId: selected.actionId, applied: true, changed, commandDisposition: selected.commandDisposition, commandExecuted: false });

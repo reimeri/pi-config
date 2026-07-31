@@ -11,13 +11,7 @@ import { stableHash } from "../util/text.js";
 import { sleep } from "../util/async.js";
 import { relative } from "node:path";
 
-/**
- * Number of rename responses collected while confirming stability. A language server that is still
- * loading a project answers from a partial index and can return an edit covering only the file the
- * request was made against, which would silently publish a half-finished refactor. Two consecutive
- * identical responses are required before an edit is considered applicable; the third attempt gives
- * one bounded retry when the first pair disagrees.
- */
+/** Require two identical responses; allow one retry while a partial index stabilizes. */
 const RENAME_STABILITY_ATTEMPTS = 3;
 
 interface RenameAttempt { manifest: EditManifest; renameId: string; stable: boolean; attempts: number }
@@ -62,8 +56,7 @@ export function registerRenameTool(pi: ExtensionAPI, getRuntime: RuntimeGetter):
         if (params.apply) {
           if (!stable) throw new Error(unstableReason);
           if (renameId !== params.renameId) throw new Error("Fresh rename response does not match the previewed renameId");
-          // Consumed only once the edit is on disk, so a transient failure leaves the preview usable
-          // while a completed rename cannot be replayed from the same token.
+          // Consume after disk application so transient failures leave the preview reusable.
           const changed = await applyManifest(manifest, signal); runtime.previewRenames.delete(params.renameId!);
           for (const path of changed) { runtime.changed.add(path); await runtime.manager.syncActiveFile(path, signal, true); }
           return envelope(`Renamed symbol to ${params.newName} in ${changed.length} file(s).`, { ...baseDetails("rename", "ok", started), server: source.route.server.id, root: source.route.root, renameId, applied: true, changed, stable, attempts });

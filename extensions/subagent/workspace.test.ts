@@ -29,7 +29,7 @@ function git(cwd: string, ...args: string[]): string {
 	});
 }
 
-/** A repository with one commit, which is the state a worker normally starts from. */
+/** Repository state normally present when a worker starts. */
 function repo(): string {
 	const dir = mkdtempSync(join(tmpdir(), "pi-workspace-"));
 	tempDirs.push(dir);
@@ -95,7 +95,7 @@ describe("diffSnapshots", () => {
 	});
 
 	test("subtracts pre-existing changes so a dirty tree does not inflate the run", () => {
-		// The parent needs what this run did, not what the tree already carried.
+		// Isolate this run's changes from pre-existing ones.
 		const before = snapshot({ "src/a.ts": " M" }, { "src/a.ts": { added: 10, removed: 2 } });
 		const after = snapshot({ "src/a.ts": " M" }, { "src/a.ts": { added: 14, removed: 5 } });
 
@@ -127,7 +127,7 @@ describe("diffSnapshots", () => {
 	});
 
 	test("distinguishes a committed path from a reverted one", () => {
-		// Both leave `git status`; only the commit still differs from the commit the run started at.
+		// Both clear status; only a commit differs from the starting HEAD.
 		const before = snapshot({ "src/kept.ts": " M", "src/undone.ts": " M" }, { "src/kept.ts": { added: 1, removed: 1 } });
 		const after = snapshot({}, { "src/kept.ts": { added: 1, removed: 1 } }, "bbbbbbb");
 
@@ -153,7 +153,7 @@ describe("formatWorkspaceReport", () => {
 		}) as WorkspaceReport;
 
 	test("says so plainly when a run changed nothing", () => {
-		// The case worth catching: a confident completion report over an untouched tree.
+		// A successful-looking report over an untouched tree must be detectable.
 		expect(formatWorkspaceReport(captured())).toBe("Observed workspace changes: none.");
 	});
 

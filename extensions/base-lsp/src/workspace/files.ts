@@ -50,8 +50,7 @@ async function walk(directory: string, root: string, boundary: string, servers: 
       continue;
     }
     if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-    // `entry.name` is already the base name `matchesServerFile` would recover from `path`, and this
-    // runs once per server per entry, so pass it straight through.
+    // `entry.name` is already the basename; avoid rebuilding it once per server.
     if (!servers.some((server) => matchesServerName(server, entry.name))) continue;
     const canonicalFile = await realpath(path).catch(() => undefined);
     if (!canonicalFile || !isContained(boundary, canonicalFile)) continue;
@@ -63,12 +62,7 @@ async function walk(directory: string, root: string, boundary: string, servers: 
   }
 }
 
-/**
- * Extensions ordered longest-first, cached per definition. Sorting matters only where the *most
- * specific* match is wanted (`.d.ts` ahead of `.ts`), and a discovery sweep asks that of every
- * server for every path, so the order is derived once. Definitions are replaced wholesale on a
- * config reload, and the weak keying lets the cached copies go with them.
- */
+/** Caches extensions longest-first per definition for repeated most-specific matching. */
 const extensionOrder = new WeakMap<ServerDefinition, string[]>();
 
 function extensionsByLength(server: ServerDefinition): string[] {
@@ -90,14 +84,10 @@ export function matchedExtension(server: ServerDefinition, name: string): string
   return extensionsByLength(server).find((extension) => name.endsWith(extension));
 }
 
-/**
- * Whether this server handles `name` — a bare file name rather than a path. Callers testing one
- * name against many servers should derive it once with `fileNameOf` instead of per server.
- */
+/** Tests a bare filename; callers comparing servers should derive it once with `fileNameOf`. */
 export function matchesServerName(server: ServerDefinition, name: string): boolean {
   if (server.filenames?.includes(name)) return true;
-  // Unordered on purpose: any match settles a yes/no question, so this skips the length ordering
-  // that `matchedExtension` needs.
+  // Boolean matching does not require extension ordering.
   return server.extensions.some((extension) => name.endsWith(extension));
 }
 

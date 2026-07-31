@@ -33,8 +33,7 @@ describe("OutputOverflowStore", () => {
 	});
 
 	test("caps long output and keeps every omitted byte readable on disk", async () => {
-		// The point of the cap: the parent's context stays bounded, but nothing becomes unreachable
-		// to it. The tool details hold the full text for the UI; the model can only read a file.
+		// Bound parent context while keeping complete output readable from the spill file.
 		const overflow = store();
 		const text = `HEAD${"x".repeat(AGENT_OUTPUT_CAP * 2)}TAIL`;
 
@@ -57,9 +56,7 @@ describe("OutputOverflowStore", () => {
 	});
 
 	test("shares one directory across spills that start together", async () => {
-		// Parallel mode caps every task's output in one Promise.all, so both can reach the store
-		// before either has a directory. A directory per spill would leave all but the last one in
-		// the temp dir forever, since dispose only knows about the one it recorded last.
+		// Concurrent overflows must share one tracked directory so dispose removes all files.
 		const overflow = store(16);
 
 		const outputs = await Promise.all([
@@ -74,8 +71,7 @@ describe("OutputOverflowStore", () => {
 	});
 
 	test("keeps a path-traversing agent name inside the spill directory", async () => {
-		// Agent names come from Markdown frontmatter, so a separator in one must not escape the
-		// directory. Dots survive sanitizing; only the separators have to go.
+		// Sanitize agent names so they cannot escape the spill directory.
 		const overflow = store(16);
 
 		const spilled = overflowPath(await overflow.capForParent("../../etc/passwd", "y".repeat(200)));

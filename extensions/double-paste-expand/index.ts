@@ -10,8 +10,7 @@ type EditorFactory = Exclude<Parameters<ExtensionUIContext["setEditorComponent"]
 type TaggedEditorFactory = EditorFactory & { [WRAPPED_FACTORY]?: boolean };
 
 export default function doublePasteExpandExtension(pi: ExtensionAPI) {
-	// Resource discovery follows session_start, where editor-customizing extensions
-	// normally install their factories. Wrapping here preserves the final active editor.
+	// Wrap after session_start so this remains the final active editor.
 	pi.on("resources_discover", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 		const previous = ctx.ui.getEditorComponent() as TaggedEditorFactory | undefined;

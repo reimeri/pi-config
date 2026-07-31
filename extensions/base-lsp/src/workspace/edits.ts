@@ -43,8 +43,7 @@ export async function normalizeWorkspaceEdit(edit: WorkspaceEdit | null | undefi
     if (snapshot && snapshot.canonicalPath !== path) { reasons.push(`${path} does not match the synchronized snapshot path`); continue; }
     if (snapshot && entry.version !== undefined && entry.version !== null && snapshot.version !== entry.version) { reasons.push(`${path} snapshot version mismatch: server=${entry.version}, snapshot=${snapshot.version}`); continue; }
     const original = snapshot?.text ?? await readFile(path, "utf8");
-    // Hashed once: the snapshot check and the staged file's `hash` are the same digest of the same
-    // text, and this is a full pass over the file.
+    // Reuse one full-file hash for snapshot validation and staging.
     const originalHash = stableHash(original);
     if (snapshot && originalHash !== snapshot.contentHash) { reasons.push(`${path} synchronized snapshot hash is inconsistent`); continue; }
     const info = await stat(path);
@@ -54,11 +53,7 @@ export async function normalizeWorkspaceEdit(edit: WorkspaceEdit | null | undefi
     const normalized = entry.edits.map((item, index) => ({ ...serverRangeToOffsets(original, item.range, encoding), text: item.newText, index }));
     normalized.sort((a, b) => a.start - b.start || a.end - b.end || a.index - b.index);
     for (let index = 1; index < normalized.length; index += 1) if (normalized[index]!.start < normalized[index - 1]!.end) throw new Error(`Overlapping edits for ${path}`);
-    // Assembled in one forward pass over `normalized`, which is already sorted ascending and proven
-    // non-overlapping just above. Splicing each edit into an accumulating string instead rebuilt the
-    // whole file per edit, so a large file at the per-file edit limit cost hundreds of milliseconds
-    // of copying. Offsets stay valid because every segment is cut from `original`, never from a
-    // partially edited copy — which is what the descending order this replaces was for.
+    // Build sorted non-overlapping edits forward from the original to preserve offsets and avoid quadratic copying.
     const segments: string[] = [];
     let cursor = 0;
     for (const item of normalized) {

@@ -192,10 +192,7 @@ async function normalizeDocumentSymbols(items: Array<DocumentSymbol | SymbolInfo
       totalAtLeast += 1;
       if (symbols.length >= limit) { truncated = true; return false; }
       if (isDocumentSymbol(item)) {
-        // A symbol whose range does not fit the synchronized text is reported without a public
-        // range rather than failing the whole outline. The two ranges are independent: each keeps
-        // its own raw server range when it fails, so a raw range never stands in for a sibling
-        // that converted cleanly.
+        // Omit only the unconvertible public range; preserve each raw range independently.
         const range = tryConvertRange(sourceText, item.range, encoding);
         const selectionRange = tryConvertRange(sourceText, item.selectionRange, encoding);
         if (!range || !selectionRange) unresolvedRanges += 1;

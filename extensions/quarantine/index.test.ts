@@ -24,9 +24,7 @@ describe("shouldRestoreEnabled", () => {
 		expect(shouldRestoreEnabled(disabledState, undefined, false)).toBe(false);
 	});
 
-	// Quarantine enabled through the emergency direct path writes only the legacy
-	// entry. A stale coordinator entry from an earlier plan-mode toggle must not
-	// override it, or resuming silently drops quarantine.
+	// Legacy-only activation must override stale coordinator state on resume.
 	test("keeps quarantine on when only the legacy entry records it", () => {
 		expect(shouldRestoreEnabled(enabledState, { activeModeIds: [] }, true)).toBe(true);
 		expect(shouldRestoreEnabled(enabledState, { activeModeIds: ["plan"] }, true)).toBe(true);

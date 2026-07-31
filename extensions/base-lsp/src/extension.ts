@@ -64,8 +64,7 @@ export default function registerBaseLsp(pi: ExtensionAPI): void {
       const path = await resolveInputPathDetails(stripLeadingAt(input.path), ctx.cwd, current.boundary);
       if (runtime !== current) return;
       current.changed.add(path.canonical);
-      // Match the name and parent through which the tool wrote. The canonical file may be the
-      // target of a marker-named symlink and therefore have a completely different name and parent.
+      // Match the written path, not its canonical symlink target.
       if (path.lexicalDirectory && isRootMarkerName(current.registry.enabled(), fileNameOf(path.lexical))) current.roots.invalidateUnder(path.lexicalDirectory);
       await current.manager.syncActiveFile(path.canonical, ctx.signal, true);
     } catch { /* mutation outside the active boundary or removed file */ }

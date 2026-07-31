@@ -158,7 +158,7 @@ describe("plan-mode context", () => {
 		expect(enabled.systemPrompt).toContain("[PLAN MODE ACTIVE]");
 		expect(enabled.systemPrompt).toContain("ask_user");
 
-		// Byte-identical across turns: this is what keeps the cached prefix intact.
+		// Byte-identical output preserves the cached prefix.
 		const nextTurn = await handlers.get("before_agent_start")?.[0]?.(base, ctx);
 		expect(nextTurn.systemPrompt).toBe(enabled.systemPrompt);
 
@@ -182,7 +182,7 @@ describe("plan-mode context", () => {
 		await commands.get("plan")?.handler("", ctx);
 		const enabled = await contextHandler?.({ messages }, ctx);
 
-		// Same output on and off, so toggling cannot move the divergence point.
+		// Both paths match so toggling cannot move the cache boundary.
 		expect(enabled.messages).toEqual(disabled.messages);
 	});
 

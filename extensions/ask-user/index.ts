@@ -67,10 +67,7 @@ function currentAssistantAskUserCallIds(ctx: ExtensionContext): string[] {
 	return [];
 }
 
-// Without a UI there is nobody to answer, so ask_user is withheld for the whole
-// session. Expressed as a tool mode rather than a direct setActiveTools() call:
-// the coordinator owns the active set, and a direct call at session_start races
-// plan-mode and quarantine restore depending on extension load order.
+// Use a tool mode so the coordinator restores active tools without load-order races.
 const NO_ASK_USER_MODE: ToolModeDefinition = {
 	id: "no-ask-user",
 	priority: 0,
@@ -80,8 +77,7 @@ const NO_ASK_USER_MODE: ToolModeDefinition = {
 export default function askUserExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.hasUI) return;
-		// Not persisted: the mode is re-derived from ctx.hasUI on every session start
-		// rather than restored from session state.
+		// Derive this from ctx.hasUI on each start instead of persisting it.
 		const result = await setToolMode(pi.events, NO_ASK_USER_MODE, true);
 		if (result.status === "unavailable") {
 			pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "ask_user"));

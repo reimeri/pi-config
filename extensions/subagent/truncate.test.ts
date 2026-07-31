@@ -22,8 +22,7 @@ describe("truncateAgentOutput", () => {
 			const { text: kept, omittedBytes } = truncateAgentOutput(text);
 			const keptBytes = Buffer.byteLength(kept, "utf8");
 			expect(keptBytes, unit).toBeLessThanOrEqual(CAP);
-			// Within one character of the cap: the only shortfall allowed is the character that
-			// would not fit.
+			// Unused capacity is smaller than one maximum-width character.
 			expect(keptBytes, unit).toBeGreaterThan(CAP - 4);
 			expect(text.startsWith(kept), unit).toBe(true);
 			expect(omittedBytes, unit).toBe(Buffer.byteLength(text, "utf8") - keptBytes);
@@ -31,8 +30,7 @@ describe("truncateAgentOutput", () => {
 	});
 
 	test("never splits a surrogate pair", () => {
-		// The old truncation cut one UTF-16 unit at a time, so whether it left a lone surrogate
-		// depended on where the cap happened to fall. Shifting the alignment finds those cases.
+		// Test cap alignments that previously left lone UTF-16 surrogates.
 		for (let pad = 0; pad < 8; pad++) {
 			const text = "a".repeat(pad) + "🙂".repeat(60_000);
 			const { text: kept } = truncateAgentOutput(text);
@@ -42,8 +40,7 @@ describe("truncateAgentOutput", () => {
 	});
 
 	test("agrees with a character-at-a-time reference on the boundary it picks", () => {
-		// The reference is the original algorithm, minus its surrogate flaw: step back whole code
-		// points instead of code units.
+		// Compare with the original algorithm corrected to remove whole code points.
 		const reference = (output: string): string => {
 			if (Buffer.byteLength(output, "utf8") <= CAP) return output;
 			let points = [...output].slice(0, CAP);
@@ -62,9 +59,7 @@ describe("truncateAgentOutput", () => {
 	});
 
 	test("truncates multi-byte output in linear time", () => {
-		// Overshooting the byte budget and then re-measuring per removed character cost ~800ms for
-		// this input on the runtime Pi actually uses, against ~0.2ms here. The work no longer scales
-		// with how much gets discarded.
+		// Ensure trimming cost depends on retained output, not discarded output.
 		const text = "这是一个测试用的字符串。".repeat(20_000);
 		const started = performance.now();
 		const result = truncateAgentOutput(text);

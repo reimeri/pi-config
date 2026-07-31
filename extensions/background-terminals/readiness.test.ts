@@ -34,9 +34,7 @@ describe("validateSafeRegex", () => {
 		expect(accepts("a".repeat(1001))).toBe(false);
 	});
 
-	// Structural checks alone do not bound backtracking: adjacent bounded
-	// quantifiers multiply. `.{1,900}.{1,900}x` contains no rejected construct yet
-	// took ~18s against a single 64KB window before the budget existed.
+	// Adjacent bounded quantifiers evade structural checks but can backtrack catastrophically.
 	test("rejects patterns whose bounded quantifiers multiply", () => {
 		expect(accepts(".{1,900}.{1,900}x")).toBe(false);
 		expect(accepts("[a-z]{1,1000}[a-z]{1,1000}!")).toBe(false);
@@ -47,7 +45,7 @@ describe("validateSafeRegex", () => {
 		// 100 * 10 == 1000, at the limit; 100 * 11 is over it.
 		expect(accepts("a{1,100}b{1,10}")).toBe(true);
 		expect(accepts("a{1,100}b{1,11}")).toBe(false);
-		// A fixed repeat has one alternative, so it costs nothing to backtracking.
+		// Fixed repeats have one alternative and add no backtracking cost.
 		expect(accepts("a{500}b{500}c{500}")).toBe(true);
 	});
 

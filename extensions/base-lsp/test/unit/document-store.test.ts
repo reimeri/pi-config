@@ -16,8 +16,7 @@ describe("unchanged-document detection", () => {
   const store = (methods: string[] = []) => new DocumentStore(fakeServer(), capabilities, async (method) => { methods.push(method); }, 10, 1024 * 1024);
 
   it("catches a same-length rewrite, however fast it follows the last sync", async () => {
-    // The hazard in trusting size and modification time: an agent flipping a digit or a boolean
-    // leaves the byte count untouched, and back-to-back edits can land within one clock tick.
+    // Same-size writes within one clock tick defeat size/mtime-only validation.
     const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-samesize-"));
     const path = join(root, "a.ts");
     const documents = store();
@@ -32,9 +31,7 @@ describe("unchanged-document detection", () => {
   });
 
   it("catches a rewrite that keeps the recorded modification time", async () => {
-    // Pinning mtime back after the write is what a stale-cache bug looks like from the outside.
-    // Only the racily-clean rule — the timestamp must predate the read that cached the text —
-    // separates this from the trusted case below.
+    // Restored mtime simulates a stale cache; only the racily-clean rule rejects it.
     const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-racy-"));
     const path = join(root, "a.ts");
     const pinned = new Date(Date.now() + 60_000);
@@ -50,7 +47,7 @@ describe("unchanged-document detection", () => {
   });
 
   it("catches a length change that keeps the recorded modification time", async () => {
-    // Timestamp deliberately old enough to be trusted, so only the size comparison rejects this.
+    // Use an old mtime so size is the only rejecting signal.
     const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-size-"));
     const path = join(root, "a.ts");
     const past = new Date(Date.now() - 60_000);
@@ -66,10 +63,7 @@ describe("unchanged-document detection", () => {
   });
 
   it("skips the read when size and modification time both hold steady", async () => {
-    // Proving the fast path engages by observing its deliberate blind spot: a file rewritten to the
-    // same length with its old timestamp restored is indistinguishable from an untouched one. That
-    // takes an external actor preserving timestamps (`cp -p`, `rsync --times`); ordinary writes
-    // move mtime forward and are caught by the test above.
+    // Same bytes, size, and restored mtime are intentionally indistinguishable to the fast path.
     const root = await mkdtemp(join(tmpdir(), "base-lsp-doc-fastpath-"));
     const path = join(root, "a.ts");
     const past = new Date(Date.now() - 60_000);
@@ -95,7 +89,7 @@ describe("unchanged-document detection", () => {
     await writeFile(path, "const v = 1; // longer now\n");
     expect((await documents.sync(path)).syncState).toBe("changed");
 
-    // Rewriting identical bytes moves mtime but is not an edit; the server must not be told it is.
+    // Identical content must not trigger a server edit notification.
     await writeFile(path, "const v = 1; // longer now\n");
     expect((await documents.sync(path)).syncState).toBe("unchanged");
     expect(methods).toEqual(["textDocument/didOpen", "textDocument/didChange"]);
@@ -159,8 +153,7 @@ describe("document synchronization ordering", () => {
     await writeFile(path, "const v = 2;\n"); await store.sync(path);
     expect(store.get(path)?.version).toBe(2);
     await store.close(path);
-    // Reopening with different content must not reuse version 1: consumers treat a matching
-    // (uri, version) pair as proof that a server publication describes this exact content.
+    // Different content after reopen must not reuse version 1.
     await writeFile(path, "const v = 3;\n");
     const reopened = await store.sync(path);
     expect(reopened.syncState).toBe("opened");

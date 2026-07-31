@@ -26,15 +26,9 @@ export async function readJsonSse(
 	const decoder = new TextDecoder();
 	const maxEventBytes = options.maxEventBytes ?? DEFAULT_MAX_EVENT_BYTES;
 	const maxStreamBytes = options.maxStreamBytes ?? DEFAULT_MAX_STREAM_BYTES;
-	/**
-	 * Fragments of the line currently being received, kept unjoined. A provider can deliver one
-	 * `data:` line of several MB across hundreds of reads; accumulating that into a single string
-	 * and re-splitting it per read cost O(line) each time, making a large event quadratic to
-	 * receive. Newlines are searched for within each arriving chunk instead, so the retained
-	 * fragments are only joined once, when their line completes.
-	 */
+	/** Keep line fragments separate so large streamed lines are joined only once. */
 	let pending: string[] = [];
-	/** Combined byte length of `pending`, maintained incrementally for the same reason. */
+	/** Track pending bytes incrementally. */
 	let pendingBytes = 0;
 	let eventName = "";
 	let dataLines: string[] = [];
@@ -63,8 +57,7 @@ export async function readJsonSse(
 		return (await onEvent({ event: currentName, data })) === true;
 	};
 
-	/** Complete the pending line with `tail`, consuming the fragments. Mirrors a `/\r?\n/` split: a
-	 * lone carriage return is not a separator, but one directly before the newline is dropped. */
+	/** Complete a line using CRLF semantics; lone CR is data. */
 	const takeLine = (tail: string): string => {
 		const line = pending.length === 0 ? tail : pending.join("") + tail;
 		pending = [];
@@ -113,8 +106,6 @@ export async function readJsonSse(
 				lineStart = newline + 1;
 				newline = decoded.indexOf("\n", lineStart);
 			}
-			// `takeLine` cleared the counter for each completed line; whatever follows the last
-			// newline is the new pending line and is the only part still awaiting one.
 			if (lineStart > 0) {
 				const tail = decoded.slice(lineStart);
 				pending = tail ? [tail] : [];
@@ -131,7 +122,7 @@ export async function readJsonSse(
 			try {
 				await reader.cancel();
 			} catch {
-				// Best-effort stream cleanup.
+				// Ignore cleanup failure.
 			}
 		}
 		reader.releaseLock();

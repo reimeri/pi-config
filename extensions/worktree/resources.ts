@@ -79,9 +79,7 @@ async function publishWithoutOverwrite(staged: string, target: string, root = tr
 		}
 		throw error;
 	}
-	// The top-level destination was created exclusively. Publish every descendant
-	// with the same no-overwrite rule. On a race, leave our partial directory in
-	// place rather than recursively deleting content another process may have added.
+	// Publish without overwriting; on races, do not delete files another process may have added.
 	for (const entry of await readdir(staged)) {
 		await publishWithoutOverwrite(join(staged, entry), join(target, entry), false);
 	}

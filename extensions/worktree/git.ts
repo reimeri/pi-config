@@ -131,8 +131,7 @@ export async function addWorktree(
 			args = ["worktree", "add", "-b", resolution.branch, "--", path, resolution.startRef];
 			break;
 	}
-	// Run from the invoking checkout so relative start refs (HEAD, HEAD~1, @{-1}) resolve in the
-	// same worktree that validateStartRef checked them against.
+	// Use the invoking checkout so ref validation and execution resolve identically.
 	const result = await pi.exec("git", args, { cwd: snapshot.currentRoot });
 	return result.code === 0
 		? { ok: true, value: undefined }

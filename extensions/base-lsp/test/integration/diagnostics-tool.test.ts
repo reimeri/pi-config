@@ -59,7 +59,7 @@ describe("diagnostics tool scheduling", () => {
     try {
       const result = await toolFor(runtime).execute("call", { paths: [path], mode: "paths", waitMs: 1_500 }, undefined, undefined, { cwd: root });
       const file = result.details.files[0];
-      // The good diagnostic survives: one bad range must not discard the whole file.
+      // Preserve valid diagnostics when one range is invalid.
       expect(file.state).toBe("diagnostics");
       expect(file.diagnostics).toHaveLength(2);
       expect(file.message).toBeUndefined();
@@ -189,8 +189,7 @@ describe("diagnostics tool scheduling", () => {
   it("checks every chunk instead of letting the first one consume the whole deadline", async () => {
     const root = await mkdtemp(join(tmpdir(), "base-lsp-diagnostic-chunk-share-"));
     await writeFile(join(root, "tsconfig.json"), "{}");
-    // Sorted discovery puts the silent file in the first chunk, so the later chunks are exactly the
-    // ones a first-come-first-served budget would starve.
+    // Put the silent file first so first-come budgeting would starve later chunks.
     const files = [join(root, "a-silent.ts"), join(root, "b.ts"), join(root, "c.ts"), join(root, "d.ts")];
     await Promise.all(files.map((path) => writeFile(path, "const value = 1;\n")));
     const pushOnly = { ...fakeServer({ FAKE_LSP_NO_PULL: "1", FAKE_LSP_PUSH: "1", FAKE_LSP_SILENT_URI_SUFFIX: "a-silent.ts" }), id: "push-only" };
@@ -205,7 +204,7 @@ describe("diagnostics tool scheduling", () => {
       expect(Date.now() - started).toBeLessThan(1_000);
       const byPath = new Map(result.details.files.map((file: any) => [file.path, file.state]));
       expect(byPath.get("a-silent.ts")).toMatch(/^(timed_out|unconfirmed)$/);
-      // The silent file gets its share and no more; the remaining chunks are still collected.
+      // The silent file consumes only its share; continue collecting other chunks.
       expect([byPath.get("b.ts"), byPath.get("c.ts"), byPath.get("d.ts")]).toEqual(["clean", "clean", "clean"]);
     } finally { await manager.shutdown(); }
   });
@@ -225,8 +224,7 @@ describe("diagnostics tool scheduling", () => {
       const first = await tool.execute("call", { paths: [path], mode: "paths", waitMs: 120 }, undefined, undefined, { cwd: root });
       expect(first.details.status).toBe("timed_out");
       expect(first.details.files[0].state).toBe("timed_out");
-      // Giving up on the wait must not terminate the server that was still initializing, or the
-      // retry below would pay for another cold start and time out exactly the same way.
+      // Timeout must not kill initialization; retry reuses the warming client.
       await waitUntil(() => manager.status().some((client) => client.state === "ready"));
       const second = await tool.execute("call", { paths: [path], mode: "paths", waitMs: 120 }, undefined, undefined, { cwd: root });
       expect(second.details.status).toBe("ok");
@@ -250,12 +248,10 @@ describe("diagnostics tool scheduling", () => {
       const sweep = toolFor(runtime).execute("call", { paths: swept, mode: "paths", waitMs: 1_500 }, undefined, undefined, { cwd: root });
       await waitUntil(() => manager.getActiveClients().length > 0);
       const client = manager.getActiveClients()[0]!;
-      // Let the batch open its chunk and settle into the collection wait before competing with it.
+      // Let the batch enter collection before starting the competing request.
       await waitUntil(() => client.status().openDocuments >= 2);
       await new Promise((resolve) => setTimeout(resolve, 150));
-      // A batch that pins the entire document budget leaves nothing evictable, so this call parks in
-      // the store's eviction wait until the sweep releases its pins. The reserved headroom is what
-      // lets it through immediately instead of inheriting the sweep's latency.
+      // Reserved headroom lets competing calls proceed while the sweep pins documents.
       const started = Date.now();
       const snapshot = await client.documents!.sync(bystander);
       expect(Date.now() - started).toBeLessThan(400);

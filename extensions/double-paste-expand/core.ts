@@ -39,7 +39,7 @@ interface AppEditorFields {
 	onExtensionShortcut?: (data: string) => boolean;
 }
 
-/** Mirror the normalization Pi applies before deciding whether to collapse a paste. */
+/** Apply Pi's paste normalization before deciding whether to collapse. */
 export function cleanPastedText(text: string, charBeforeCursor = ""): string {
 	const decoded = text.replace(/\x1b\[(\d+);5u/g, (match, code: string) => {
 		const codePoint = Number(code);
@@ -85,10 +85,7 @@ function expectedTextWithoutMarker(candidate: PasteCandidate): string {
 	return lines.join("\n");
 }
 
-/**
- * Decorates Pi's active editor. The wrapped editor retains ownership of rendering,
- * paste storage, keybindings, autocomplete, and submission.
- */
+/** Wrap Pi's editor while preserving rendering, input, and submission behavior. */
 export class DoublePasteEditor implements EditorComponent {
 	readonly actionHandlers?: Map<string, () => void>;
 	private candidate?: PasteCandidate;
@@ -239,8 +236,7 @@ export class DoublePasteEditor implements EditorComponent {
 		const expectedAfterDelete = expectedTextWithoutMarker(candidate);
 		this.base.handleInput(BACKSPACE);
 		if (this.base.getText() !== expectedAfterDelete) {
-			// A non-Pi editor may not treat the marker atomically. Restore the common
-			// one-character deletion case and fall back to normal paste behavior.
+			// Restore one-character deletion when a non-Pi editor does not treat the marker atomically.
 			const expectedSingleDelete =
 				candidate.visibleText.slice(0, this.absoluteCursorIndex(candidate) - 1) +
 				candidate.visibleText.slice(this.absoluteCursorIndex(candidate));

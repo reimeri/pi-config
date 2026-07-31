@@ -17,10 +17,7 @@ function setsEqual(left: Set<string>, right: Set<string>): boolean {
 	return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
-/**
- * Maintains a user-preferred active set while temporarily suppressing URL Context.
- * Unlike a restrictive tool mode, newly activated tools remain active.
- */
+/** Temporarily suppresses URL Context while preserving newly activated tools. */
 export function createModelScopedToolManager(controller: ToolSetController) {
 	let preferred: Set<string> | undefined;
 	let lastApplied: Set<string> | undefined;

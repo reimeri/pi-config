@@ -63,9 +63,7 @@ export async function switchToWorktreeSession(
 		SessionManager.create(cwd, undefined, parent ? { parentSession: parent } : undefined));
 	const manager = createSession(result.worktreePath, parentSession);
 
-	// Pi intentionally does not write a new session file until it has an assistant
-	// message. Persist one orphaned synthetic message, then reset the active leaf so
-	// the fresh worktree context is the only message visible to the model.
+	// Persist an orphan marker, then reset the leaf so only the new worktree context remains visible.
 	manager.appendMessage(persistenceSentinel());
 	manager.resetLeaf();
 	manager.appendCustomMessageEntry(

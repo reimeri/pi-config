@@ -71,10 +71,7 @@ function isToolModeRequest(value: unknown): value is ToolModeRequest {
 
 export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 	const coordinator = new ToolModeCoordinator(pi);
-	// Sorted, joined mode ids as last announced to the model; undefined until the
-	// first reconcile of the session. That first reconcile only records the
-	// starting modes, so a resumed session does not re-announce a restriction its
-	// own branch history already records.
+	// Do not re-announce restrictions already present in resumed history.
 	let announcedModeIds: string | undefined;
 
 	function announceModeChange(activeModeIds: string[]): void {
@@ -91,10 +88,7 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 		});
 	}
 
-	// `announce` is off on the per-request enforcement path: sending a message
-	// while a request is being assembled would land it in an arbitrary position.
-	// The turn boundaries below always run before the next model call, so a change
-	// is still recorded before the model can act on stale history.
+	// Defer announcements to turn boundaries so messages do not land mid-request.
 	function reconcileWithLocalFailClosedModes(options: { announce?: boolean } = {}): ToolModeResult {
 		const localReports = locallyActiveToolModeReports(pi.events);
 		const toolsBeforeReconcile = pi.getActiveTools();
@@ -155,8 +149,7 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 			try {
 				coordinator.restore(snapshot);
 			} catch {
-				// The requesting mode handles coordinator failure; quarantine has a
-				// direct fail-closed fallback and hard tool-call gate.
+				// Quarantine supplies a direct fail-closed fallback when coordination fails.
 			}
 			data.fail(error instanceof Error ? error.message : String(error));
 			return;
@@ -164,14 +157,11 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 		data.respond(result);
 	});
 
-	// Reassert active policies around every model turn so tools dynamically
-	// activated by another extension cannot escape a restrictive mode.
+	// Reassert policies each turn so dynamically activated tools cannot bypass them.
 	pi.on("before_agent_start", () => {
 		reconcileWithLocalFailClosedModes({ announce: true });
 	});
-	// Enforcement only. The model learns the active tool set from the request's
-	// tool definitions and the system prompt's tool list, both rebuilt whenever
-	// the active set changes, so there is nothing to inject here.
+	// The request already contains the authoritative tool set; no message is needed.
 	pi.on("context", () => {
 		reconcileWithLocalFailClosedModes();
 	});
@@ -179,8 +169,7 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 		reconcileWithLocalFailClosedModes({ announce: true });
 	});
 
-	// A replacement session inherits the process-wide active tool set. Restore
-	// the unconstrained baseline before its fresh extension runtime starts.
+	// Restore the unconstrained baseline before starting a replacement session.
 	pi.on("session_shutdown", () => {
 		unsubscribe();
 		coordinator.shutdown();

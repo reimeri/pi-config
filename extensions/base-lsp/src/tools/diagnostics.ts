@@ -200,14 +200,7 @@ async function runDiagnosticGroup(runtime: SessionRuntime, group: WorkGroup, mod
   } finally { if (client) runtime.manager.release(client); }
 }
 
-/**
- * The shared deadline bounds how long this tool blocks, not how long a language server is allowed
- * to start. Aborting the acquisition would drop the manager's last waiter, which force-terminates a
- * server that is still initializing, so a cold start slower than `waitMs` could never converge:
- * every retry would kill the process it was waiting for. Instead the acquisition keeps running on
- * the caller's own cancellation signal and is released in the background, leaving a warm client
- * behind for the next call while this one reports its files as timed out.
- */
+// Do not abort client acquisition at the call deadline; let a cold-starting server warm for retries.
 async function acquireWithinDeadline(runtime: SessionRuntime, route: Route, budgetMs: number, signal?: AbortSignal): Promise<LspClient> {
   const acquisition = runtime.manager.acquire(route, signal);
   let expire!: (error: Error) => void;
@@ -222,23 +215,13 @@ async function acquireWithinDeadline(runtime: SessionRuntime, route: Route, budg
   } finally { clearTimeout(timer); }
 }
 
-/**
- * A push batch pins every document it opens for the whole collection wait, so a chunk sized to the
- * entire document budget leaves nothing evictable and any concurrent operation on the same client
- * parks in the store's eviction wait until it fails. Reserve a slice of the budget for those
- * callers. Default limits are chosen so a default-sized sweep still fits in a single chunk.
- */
+// Reserve document capacity because push batches pin opened documents during collection.
 export function pushChunkSize(maxOpenDocuments: number): number {
   const reserve = Math.min(16, Math.max(1, Math.ceil(maxOpenDocuments / 10)));
   return Math.max(1, maxOpenDocuments - reserve);
 }
 
-/**
- * Each chunk receives an equal share of what is left of the call deadline, so one slow chunk cannot
- * consume the whole budget and leave later chunks unopened and unchecked. A chunk that settles
- * early hands its unused share back to the next one, and a group that fits in a single chunk still
- * receives the entire remaining deadline.
- */
+// Divide remaining time among chunks; unused time rolls forward so early chunks cannot starve later ones.
 export function chunkBudgetMs(remainingMs: number, itemsLeft: number, chunkSize: number): number {
   return Math.max(1, Math.floor(remainingMs / Math.max(1, Math.ceil(itemsLeft / chunkSize))));
 }
@@ -339,11 +322,7 @@ function aggregateStatus(states: string[], affirmative: number): ToolStatus {
 }
 function evidenceStateFromError(error: unknown, signal?: AbortSignal): DiagnosticEvidence["state"] { if (signal?.reason instanceof TimeoutError) return "timed_out"; const status = statusFromError(error); return status === "timed_out" || status === "cancelled" || status === "unavailable" ? status : "error"; }
 function severityMatches(diagnostic: Diagnostic, severity: string): boolean { const wanted: Record<string, number> = { error: 1, warning: 2, information: 3, hint: 4 }; return severity === "all" || diagnostic.severity === wanted[severity]; }
-/**
- * A push diagnostic is inherently asynchronous with respect to the snapshot we hold, so its range
- * may not fit the text we can see. That is one bad range, not a reason to discard every finding for
- * the file: the public columns are dropped and the raw server range preserved, as locations do.
- */
+// Preserve a stale push diagnostic's raw range without discarding other findings.
 function normalizeDiagnostic(diagnostic: Diagnostic, text: string, encoding: "utf-8" | "utf-16" | "utf-32"): Record<string, unknown> {
   const converted = tryConvertRange(text, diagnostic.range, encoding);
   return {

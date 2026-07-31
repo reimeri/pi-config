@@ -2,14 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-/**
- * A temp directory created on first use and removed on dispose.
- *
- * Creation is shared rather than re-tested per caller: two callers that both found no directory
- * would each make one, and only the last would be tracked, leaving the other behind in the temp dir
- * for good. Dispose also chases a creation still in flight, which would otherwise land after the
- * cleanup that was supposed to remove it.
- */
+/** Lazily creates one shared temp directory and removes in-flight creations on dispose. */
 export class LazyTempDirectory {
 	private dir: string | null = null;
 	private pending: Promise<string> | null = null;
@@ -31,19 +24,13 @@ export class LazyTempDirectory {
 			const created: Promise<string> = fs.promises
 				.mkdtemp(path.join(os.tmpdir(), this.prefix))
 				.then((dir) => {
-					// Dispose may already have run, either while this creation was in flight or before it
-					// started. Adopting the directory now would leave `path` naming something that has been
-					// removed, and nothing would ever remove one created after the cleanup.
+					// Dispose any directory created after shutdown instead of adopting it.
 					if (this.isDisposed) this.remove(dir);
 					else this.dir = dir;
 					return dir;
 				})
 				.catch((error) => {
-					// A cached rejection would be handed to every later caller, so one transient failure
-					// (EMFILE under a wide fan-out, a briefly full tmp) would disable the directory for the
-					// rest of the process. Forget it instead so the next call retries — but only while this
-					// is still the tracked attempt, since clearing a newer one would let two creations run
-					// with only the last of them tracked.
+					// Clear only this failed attempt so retries cannot create untracked directories.
 					if (this.pending === created) this.pending = null;
 					throw error;
 				});
@@ -69,7 +56,7 @@ export class LazyTempDirectory {
 		try {
 			fs.rmSync(dir, { recursive: true, force: true });
 		} catch {
-			/* a leftover temp directory is not worth failing shutdown over */
+			/* Ignore cleanup failure. */
 		}
 	}
 }

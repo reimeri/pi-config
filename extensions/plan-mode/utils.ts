@@ -1,14 +1,5 @@
-/**
- * Pure utility functions for plan mode.
- * Extracted for testability.
- *
- * `isSafeCommand` is a best-effort guardrail, not a security control. It matches
- * patterns against the raw command string: the deny list matches anywhere, the
- * allow list only anchors the leading command. Chained, piped, and interpreter
- * forms can pass it. Use quarantine when the restriction has to hold.
- */
+/** Matches raw leading commands; chains, pipes, and interpreters may bypass it. Use quarantine for enforcement. */
 
-// Destructive commands blocked in plan mode
 const DESTRUCTIVE_PATTERNS = [
 	/\brm\b/i,
 	/\brmdir\b/i,
@@ -45,7 +36,6 @@ const DESTRUCTIVE_PATTERNS = [
 	/\b(vim?|nano|emacs|code|subl)\b/i,
 ];
 
-// Safe read-only commands allowed in plan mode
 const SAFE_PATTERNS = [
 	/^\s*cat\b/,
 	/^\s*head\b/,
@@ -210,13 +200,7 @@ export function extractPlanSteps(message: string): PlanStep[] {
 	return items;
 }
 
-/**
- * Plan-mode instructions, appended to the system prompt for as long as the mode is
- * on. Deliberately not a per-turn message: a message injected on every turn and
- * filtered back out on the next one moves the prompt's divergence point forward
- * each turn, which re-bills the whole conversation. The system prompt changes only
- * when the mode itself does, so the cost is one invalidation per toggle.
- */
+/** Stable system-prompt instructions that invalidate the cache only when mode changes. */
 export function planModeInstructions(canAskUser: boolean): string {
 	const clarificationGuidance = canAskUser
 		? "Ask clarifying questions using the ask_user tool."

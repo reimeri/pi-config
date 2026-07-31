@@ -39,9 +39,7 @@ describe("LineStream", () => {
 	});
 
 	test("preserves multi-byte characters split across chunk boundaries", () => {
-		// The failure this guards: decoding each chunk independently yields replacement
-		// characters. The line still parses — non-ASCII lives inside JSON string values —
-		// so the subagent's text silently arrives as mojibake.
+		// Independent chunk decoding corrupts multibyte text while leaving JSON valid.
 		const payload = JSON.stringify({ text: "héllo → 𝔘 🙂 世界" });
 		for (const size of [1, 2, 3, 5, 7]) {
 			expect(collect(byteChunks(`${payload}\n`, size))).toEqual([payload]);
@@ -60,8 +58,7 @@ describe("LineStream", () => {
 			let text = "";
 			for (let i = rand(60); i > 0; i--) text += alphabet[rand(alphabet.length)];
 
-			// Reference: split the whole text at once, dropping only a trailing empty
-			// segment, which corresponds to a final newline rather than a real line.
+			// Match whole-text splitting while omitting only the final newline segment.
 			const expected = text.split("\n");
 			if (expected.at(-1) === "") expected.pop();
 
@@ -72,7 +69,7 @@ describe("LineStream", () => {
 	});
 
 	test("receives one long line in linear time", () => {
-		// Re-splitting an accumulating buffer per chunk made this quadratic.
+		// Re-splitting accumulated input would make long-line processing quadratic.
 		const line = `${"x".repeat(8_000_000)}\n`;
 		const chunks = byteChunks(line, 16 * 1024);
 		const started = performance.now();

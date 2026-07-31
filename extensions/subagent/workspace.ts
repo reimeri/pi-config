@@ -1,11 +1,4 @@
-/**
- * Observed workspace changes for a child run.
- *
- * The parent is told what an agent changed by the agent itself, which is a claim. Snapshotting the
- * working tree around the run turns that into something checkable: the parent sees the files that
- * actually moved, including the case where a confident completion report accompanies no change at
- * all, without spending a turn on its own `git` call.
- */
+/** Captures and reports workspace changes observed around a child run. */
 
 import { execFile } from "node:child_process";
 
@@ -62,15 +55,12 @@ function runGit(cwd: string, args: string[]): Promise<GitResult> {
 				timeout: GIT_TIMEOUT_MS,
 				maxBuffer: GIT_MAX_BUFFER,
 				windowsHide: true,
-				// Keep this observation from taking the index lock, so it cannot interfere with
-				// anything the child or the user is doing in the same checkout.
+				// Avoid taking the index lock while observing a shared checkout.
 				env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
 			},
 			(error, stdout) => {
 				if (!error) return resolve({ ok: true, stdout });
-				// A numeric `code` is the command's own exit status; a string one means the spawn
-				// itself failed, and a kill (the timeout) leaves neither. Only the first is a
-				// verdict from git that a caller can act on.
+				// Only numeric exit status represents Git's verdict; spawn failures and timeouts do not.
 				const code = (error as Error & { code?: string | number }).code;
 				const reason =
 					code === "ENOENT" ? "git is not available" : error.message.split("\n")[0] || "git failed";
@@ -107,23 +97,13 @@ export function parseNumstat(stdout: string): Map<string, LineDelta> {
 	return numstat;
 }
 
-/**
- * The state of the checkout right now.
- *
- * `baseHead` is the commit to count lines against, which for the closing snapshot is the commit the
- * run started from rather than the current one: a child that commits its work would otherwise leave
- * nothing to see, since both `git status` and a diff against the new `HEAD` are then empty.
- */
+/** Captures status and diff data; `baseHead` overrides the current HEAD. */
 export async function captureWorkspaceSnapshot(cwd: string, baseHead?: string | null): Promise<SnapshotResult> {
-	// `--no-renames` keeps every record single-path, so a rename reads as a delete plus an add
-	// rather than needing a second field. For "what did this run touch", that is the better shape.
-	// `-uall` names the files inside a newly created directory instead of collapsing them into it.
+	// Keep records single-path and include files inside newly created directories.
 	const status = await runGit(cwd, ["status", "--porcelain=v1", "-z", "--no-renames", "-uall"]);
 	if (!status.ok) return { ok: false, reason: status.reason };
 
-	// Exit 1 with no output is a repository without commits, which is not an error: there is simply
-	// nothing to diff against, and the status codes alone still describe what changed. Any other
-	// failure is a real one, and reporting it as "no commits" would invent a HEAD move.
+	// Treat exit 1 with no HEAD as an empty repository; report other failures.
 	const head = await runGit(cwd, ["rev-parse", "--verify", "--quiet", "HEAD"]);
 	if (!head.ok && head.exitCode !== 1) return { ok: false, reason: head.reason };
 	const headSha = head.ok ? head.stdout.trim() || null : null;
@@ -157,18 +137,7 @@ function kindFromStatus(code: string): WorkspaceChangeKind {
 	return "modified";
 }
 
-/**
- * Changes between two snapshots of the same checkout.
- *
- * A path whose status code is unchanged is still compared by line counts, because an edit to a file
- * that was already dirty leaves the code at " M" throughout. That comparison is by size, so a
- * rewrite of an already-dirty file that happens to add and remove exactly as much as the edit it
- * replaced does not register; a clean tree before the run, which is the normal case, has no such
- * blind spot.
- *
- * Line counts carry the paths a run committed, which `git status` no longer knows about, so they
- * are a source of paths in their own right and not only a detail of the ones status reports.
- */
+/** Detects dirty edits when status or line counts change; equal-count rewrites may be missed. */
 export function diffSnapshots(before: WorkspaceSnapshot, after: WorkspaceSnapshot): WorkspaceDelta {
 	const changes: WorkspaceChange[] = [];
 	const paths = new Set([
@@ -185,9 +154,7 @@ export function diffSnapshots(before: WorkspaceSnapshot, after: WorkspaceSnapsho
 
 		if (beforeCode === afterCode && !moved) continue;
 		if (!afterCode) {
-			// Gone from `git status` is either a revert or a commit, and still differing from the
-			// commit the run started at is what tells the two apart. A revert's counts are the
-			// negative of what it undid, which is noise, so only the commit carries them.
+			// A disappeared status entry is a revert unless its diff still shows a committed change.
 			if (after.numstat.has(path)) {
 				changes.push({ path, kind: "committed", ...(moved && lines ? { lines } : {}) });
 			} else {
@@ -202,12 +169,7 @@ export function diffSnapshots(before: WorkspaceSnapshot, after: WorkspaceSnapsho
 	return { changes, headBefore: before.head, headAfter: after.head };
 }
 
-/**
- * `+24 -6`, the first count being added lines and the second removed.
- *
- * Either is a delta and can be negative, for a run that undid part of a change the tree already
- * carried. The bare sign convention cannot say that — `+-7` is nonsense — so it is spelled out.
- */
+/** Formats signed added/removed line deltas, including negative deltas. */
 function formatLines(lines: LineDelta): string {
 	const parts: string[] = [];
 	if (lines.added) parts.push(lines.added > 0 ? `+${lines.added}` : `${lines.added} added`);
@@ -215,12 +177,10 @@ function formatLines(lines: LineDelta): string {
 	return parts.length > 0 ? ` (${parts.join(" ")})` : "";
 }
 
-/** One line naming a change, as the parent agent reads it. */
 export function formatWorkspaceChange(change: WorkspaceChange): string {
 	return `${change.path} — ${change.kind}${change.lines ? formatLines(change.lines) : ""}`;
 }
 
-/** Every reportable line, including the HEAD move. Empty when the run changed nothing. */
 export function workspaceReportLines(report: WorkspaceReport): string[] {
 	if (report.status === "unavailable") return [];
 	const { changes, headBefore, headAfter } = report.delta;
@@ -232,7 +192,6 @@ export function workspaceReportLines(report: WorkspaceReport): string[] {
 	return lines;
 }
 
-/** The section appended to what the parent agent reads. Empty when there is nothing to report. */
 export function formatWorkspaceReport(report: WorkspaceReport | undefined): string {
 	if (!report) return "";
 	if (report.status === "unavailable") return `Observed workspace changes: unavailable (${report.reason}).`;
@@ -242,7 +201,6 @@ export function formatWorkspaceReport(report: WorkspaceReport | undefined): stri
 	return `Observed workspace changes (git, ${report.cwd}):\n${lines.map((line) => `- ${line}`).join("\n")}`;
 }
 
-/** Compact status for the collapsed tool view. */
 export function summarizeWorkspaceReport(report: WorkspaceReport | undefined): string | undefined {
 	if (!report) return undefined;
 	if (report.status === "unavailable") return `workspace: unavailable (${report.reason})`;
@@ -251,8 +209,7 @@ export function summarizeWorkspaceReport(report: WorkspaceReport | undefined): s
 	const headMoved = report.delta.headBefore !== report.delta.headAfter;
 	if (changes.length === 0) return headMoved ? "workspace: no file changes, HEAD moved" : "workspace: no changes";
 
-	// Summed as they are, negatives included, so this line agrees with the per-file list it stands in
-	// for rather than quietly clamping to a different number.
+	// Preserve negative totals so the summary matches per-file deltas.
 	const totals = changes.reduce(
 		(sum, change) => ({
 			added: sum.added + (change.lines?.added ?? 0),
@@ -272,8 +229,7 @@ export async function buildWorkspaceReport(
 	captureFailure: string | undefined,
 ): Promise<WorkspaceReport> {
 	if (!before) return { status: "unavailable", cwd, reason: captureFailure ?? "no baseline snapshot" };
-	// Counted against the commit the run started from, which is the only base that survives the run
-	// committing its own work.
+	// Compare against the starting commit even if the child committed changes.
 	const after = await captureWorkspaceSnapshot(cwd, before.head);
 	if (!after.ok) return { status: "unavailable", cwd, reason: after.reason };
 	return { status: "captured", cwd, delta: diffSnapshots(before, after.snapshot) };

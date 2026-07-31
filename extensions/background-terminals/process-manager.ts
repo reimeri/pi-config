@@ -253,8 +253,7 @@ export class BackgroundProcessManager {
 			job.child.stderr?.destroy();
 			this.finalizeJob(job, null, "SIGKILL");
 		} else {
-			// The shell leader had already finished; only its lingering descendants were
-			// signalled. Keep the real outcome instead of relabelling an exit as a kill.
+			// Preserve the leader's outcome when only lingering descendants were signalled.
 			job.snapshot.status = isFinalStatus(statusBeforeKill) ? statusBeforeKill : "killed";
 		}
 		return this.snapshot(job);
@@ -319,8 +318,7 @@ export class BackgroundProcessManager {
 				if (scanReadinessWindows(matcher, candidate)) {
 					job.readinessMatchedAt = Date.now();
 				}
-				// Retain only what a single match can span. Keeping a full window here
-				// made every chunk rescan 64KB of already-examined output.
+				// Retain boundary overlap so each chunk does not rescan prior output.
 				job.readinessWindow = matcher.overlap > 0 ? candidate.slice(-matcher.overlap) : "";
 			}
 			for (const listener of [...job.outputListeners]) listener(appended);
@@ -507,7 +505,7 @@ export class BackgroundProcessManager {
 				try {
 					job.child.kill(signal);
 				} catch {
-					// The direct child has already exited.
+					/* Child may already have exited. */
 				}
 			}
 		}

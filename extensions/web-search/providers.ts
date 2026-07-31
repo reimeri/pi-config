@@ -161,7 +161,7 @@ async function boundedResponseText(response: Response): Promise<string> {
 		}
 	} finally {
 		if (!reachedEof) {
-			try { await reader.cancel(); } catch { /* Best-effort cleanup. */ }
+			try { await reader.cancel(); } catch { /* Ignore cleanup failure. */ }
 		}
 		reader.releaseLock();
 	}
@@ -525,7 +525,7 @@ async function resolveGoogleRedirects(result: ProviderResult, signal: AbortSigna
 			const target = safeProviderUrl(response.headers.get("location"));
 			if (target) resolved.set(url, target);
 		} catch {
-			// Keep the provider redirect when canonical resolution fails.
+			// Preserve the provider redirect when canonical resolution fails.
 		}
 	}));
 	for (const item of [...result.results, ...result.citations]) {

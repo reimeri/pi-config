@@ -28,7 +28,7 @@ class FakeEventBus {
 
 class FakeTools {
 	private activeTools: string[];
-	/** Every call rebuilds the system prompt in pi, so counting them matters. */
+	/** Every setActiveTools call rebuilds Pi's system prompt, so call counts matter. */
 	applyCount = 0;
 
 	constructor(toolNames: string[]) {
@@ -94,8 +94,7 @@ describe("ToolModeCoordinator", () => {
 
 		coordinator.setMode(reorderingMode, true);
 
-		// Same members in a new order would rewrite the tool definitions and the
-		// system prompt for a change the model cannot observe.
+		// Preserve member order because reordering rewrites tool definitions and the prompt.
 		expect(tools.getActiveTools()).toEqual(baseline);
 		expect(tools.applyCount).toBe(0);
 	});
@@ -108,7 +107,6 @@ describe("ToolModeCoordinator", () => {
 		const afterEnable = tools.applyCount;
 		expect(afterEnable).toBe(1);
 
-		// reconcile() runs before every model call while a mode is active.
 		coordinator.reconcile();
 		coordinator.reconcile();
 		coordinator.reconcile();
@@ -173,7 +171,6 @@ function setupToolModeExtension(toolNames: string[]): {
 	return { pi, tools, events, handlers, sent };
 }
 
-/** Runs the reconcile that establishes the session's starting modes silently. */
 async function startSession(handlers: Map<string, Handler[]>): Promise<void> {
 	await handlers.get("before_agent_start")?.[0]?.({ systemPrompt: "unchanged" });
 }
@@ -188,13 +185,11 @@ describe("tool-mode extension context integration", () => {
 		await startSession(handlers);
 		await setToolMode(pi.events, planMode, true);
 
-		// Simulate another extension activating a tool the active policy forbids.
 		tools.setActiveTools([...tools.getActiveTools(), "write"]);
 		const messages = [{ role: "assistant", content: [{ type: "text", text: "hi" }] }];
 
 		expect(await context?.({ messages })).toBeUndefined();
 		expect(tools.getActiveTools()).toEqual(["read", "bash"]);
-		// The enforcement path must never send a message mid-request.
 		expect(sent).toHaveLength(0);
 	});
 
@@ -205,7 +200,6 @@ describe("tool-mode extension context integration", () => {
 		await startSession(handlers);
 		await setToolMode(pi.events, planMode, true);
 
-		// Simulate quarantine's direct fallback after its coordinated activation failed.
 		tools.setActiveTools(quarantineTools);
 		events.on("tool-modes:local-status", (data) => {
 			data.report("quarantine", quarantineTools);
@@ -223,7 +217,6 @@ describe("tool-mode change announcements", () => {
 
 		await startSession(handlers);
 
-		// A resumed branch already carries the message that enabled the mode.
 		expect(sent).toHaveLength(0);
 	});
 
@@ -240,7 +233,6 @@ describe("tool-mode change announcements", () => {
 		expect(sent[0].display).toBe(false);
 		expect(sent[0].content).toContain("Active restrictive modes: plan");
 
-		// Unchanged state across later turns must stay silent.
 		await turnEnd?.({});
 		await startSession(handlers);
 		expect(sent).toHaveLength(1);

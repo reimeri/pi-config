@@ -245,7 +245,7 @@ export default function todoExtension(pi: ExtensionAPI): void {
 	let currentCtx: ExtensionContext | undefined;
 
 	function updateUI(ctx: ExtensionContext): void {
-		// Clear footer progress left by older versions; the widget already shows it.
+		// Clear footer progress left by older versions.
 		ctx.ui.setStatus("todos", undefined);
 		if (todos.length === 0) {
 			ctx.ui.setWidget("todos", undefined);
@@ -272,7 +272,7 @@ export default function todoExtension(pi: ExtensionAPI): void {
 			try {
 				todos = normalizeTodos(details.todos);
 			} catch {
-				// Ignore malformed snapshots rather than breaking session restoration.
+				// Ignore malformed snapshots so restoration continues.
 			}
 		}
 		updateUI(ctx);

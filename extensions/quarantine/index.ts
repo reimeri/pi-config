@@ -54,11 +54,7 @@ function parseState(value: unknown): QuarantineState | undefined {
 	};
 }
 
-// Quarantine can be enabled through its emergency direct path while the shared
-// coordinator is unavailable, in which case only the legacy entry records it.
-// Trusting the coordinator entry alone then silently drops quarantine on resume
-// whenever an older coordinator entry exists. Neither source is authoritative on
-// its own, so any source claiming quarantine is on wins.
+// Either legacy or coordinator state may enable quarantine; accept either source on resume.
 export function shouldRestoreEnabled(
 	loaded: LoadedState,
 	coordinatorState: { activeModeIds: string[] } | undefined,
@@ -77,9 +73,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 	function isAllowedBuiltin(toolName: string): boolean {
 		if (!READ_ONLY_TOOL_NAMES.has(toolName)) return false;
 
-		// Fail closed if a built-in has been replaced. Tool names are unique, so an
-		// extension registering "read" overwrites the built-in and its provenance
-		// stops reading as "builtin" — which is exactly what must not be allowed.
+		// Require built-in provenance; replacement tools must not bypass quarantine.
 		const matchingTool = pi.getAllTools().find((tool) => tool.name === toolName);
 		return matchingTool?.sourceInfo.source === "builtin";
 	}
@@ -106,8 +100,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 			if (!nextEnabled) {
 				if (enabled) {
 					emergencyDirectMode = true;
-					// A failed disable must retain both the restricted active set and
-					// the hard tool-call gate.
+					// A failed disable must retain both the restricted set and hard call gate.
 					pi.setActiveTools(allowedTools);
 					ctx.ui.notify(
 						`Quarantine remains enabled because its coordinator failed: ${result.message}`,
@@ -117,8 +110,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 				return undefined;
 			}
 
-			// Quarantine must fail closed even if the shared coordinator is absent
-			// or faulty. Direct activation is reserved for this emergency path.
+			// This emergency path fails closed even without a working coordinator.
 			pi.setActiveTools(allowedTools);
 			emergencyDirectMode = true;
 			toolsBeforeQuarantine ??= options?.baselineSeed ?? previousTools;
@@ -144,7 +136,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 	}
 
 	function updateModeIndicator(ctx: ExtensionContext): void {
-		// Clear footer state left by older versions that rendered modes there.
+		// Clear footer state left by older versions.
 		ctx.ui.setStatus(STATUS_ID, undefined);
 		setEditorTopBarMode(pi, STATUS_ID, enabled ? "🔒 quarantine" : undefined, {
 			compactLabel: "🔒",
@@ -155,8 +147,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 
 	function persistState(state: QuarantineState, ctx: ExtensionContext): void {
 		try {
-			// Kept for backward compatibility. The coordinator entry is the
-			// canonical state for coordinated mode restoration.
+			// Retain the legacy entry for compatibility; coordinator state is canonical.
 			pi.appendEntry<QuarantineState>(STATE_ENTRY_TYPE, state);
 		} catch (error) {
 			ctx.ui.notify(
@@ -237,16 +228,14 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("quarantine", {
 		description: "Toggle hardened read-only quarantine mode",
 		handler: async (_args, ctx) => {
-			// Do not let a call that was approved before activation continue running
-			// after quarantine is reported as enabled.
+			// Calls approved before activation must not continue after quarantine is enabled.
 			await ctx.waitForIdle();
 			if (enabled) await disable(ctx);
 			else await enable(ctx);
 		},
 	});
 
-	// Keep unsafe tools out of the next request and tell the model not to seek
-	// indirect ways around the hard tool-call gate below.
+	// Remove unsafe tools and explicitly prohibit indirect bypasses.
 	pi.on("before_agent_start", async (event) => {
 		if (!enabled) return;
 
@@ -255,8 +244,7 @@ export default function quarantineExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	// Defense in depth: block stale, in-flight, dynamically activated, custom,
-	// overridden, and otherwise unknown tools even if another extension exposes one.
+	// Block all tool variants, including stale, dynamic, custom, and overridden tools.
 	pi.on("tool_call", (event) => {
 		if (!enabled || isAllowedBuiltin(event.toolName)) return;
 		return {

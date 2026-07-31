@@ -116,8 +116,7 @@ describe("formatAgentCatalog", () => {
 	});
 
 	test("names every installed agent with what it is for", () => {
-		// The description used to name scout, reviewer, and researcher outright, so any other agent
-		// was uncallable unless the model guessed it existed.
+		// Describe discovered agents rather than a fixed built-in list.
 		const text = formatAgentCatalog([agent("scout", "Fast codebase exploration"), agent("dba", "Schema review")]);
 
 		expect(text).toBe("Available agents: scout — Fast codebase exploration; dba — Schema review.");
@@ -142,8 +141,7 @@ describe("formatAgentCatalog", () => {
 	});
 
 	test("lists every agent, since an unlisted one is one the model cannot know to call", () => {
-		// Discovery does not sort, so a cap would drop agents by directory order — whichever ones the
-		// filesystem happened to hand back last.
+		// Capping unsorted discovery would make visibility filesystem-order dependent.
 		const many = Array.from({ length: 15 }, (_, i) => agent(`a${i}`, `desc ${i}`));
 		const text = formatAgentCatalog(many);
 

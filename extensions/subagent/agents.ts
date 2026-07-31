@@ -1,6 +1,3 @@
-/**
- * Agent discovery and configuration
- */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -47,17 +44,9 @@ const CONCURRENCY_GROUP_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const TRUE_VALUES = new Set(["true", "on", "yes"]);
 const FALSE_VALUES = new Set(["false", "off", "no"]);
 
-/**
- * Whether to observe workspace changes around this agent's runs.
- *
- * A concurrency group already marks the agents that mutate the shared checkout — that is what the
- * group exists to serialize — so it is also the right default for which runs are worth observing.
- * `diff:` overrides it in either direction: on for an editing agent that needs no group, off for a
- * grouped agent whose runs are not about files.
- */
+/** Whether to capture workspace changes; grouped agents default to true. */
 function parseCaptureDiff(configured: unknown, concurrencyGroup: string | undefined): boolean {
-	// The frontmatter parser resolves YAML scalars, so `diff: true` arrives as a boolean while
-	// `diff: maybe` arrives as a string. Both reach here despite the declared string record.
+	// YAML boolean scalars arrive as booleans; other values remain strings.
 	if (typeof configured === "boolean") return configured;
 	const value = typeof configured === "string" ? configured.trim().toLowerCase() : undefined;
 	if (value && TRUE_VALUES.has(value)) return true;
@@ -169,8 +158,7 @@ export function discoverAgents(
 		for (const agent of projectAgents) agentMap.set(agent.name, agent);
 	}
 
-	// Trusted extension contributions are invocation-scoped and intentionally win
-	// by name while their provider is active.
+	// Active trusted extension contributions override agents with the same name.
 	for (const contribution of extensionContributions) {
 		const agent = loadAgentFromFile(contribution.filePath, "extension", contribution.providerId);
 		if (agent) agentMap.set(agent.name, agent);
@@ -179,29 +167,12 @@ export function discoverAgents(
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
 }
 
-/**
- * The installed agents, as one line for the tool description.
- *
- * The description used to name scout, reviewer, and researcher outright, which made it a claim about
- * the user's configuration rather than a description of the tool: an agent added, renamed, or
- * removed left the model choosing from a list that no longer existed, and any agent beyond those
- * three was invisible unless the model guessed its name.
- *
- * Every agent is named, and its description is carried in full. Capping the count or the length
- * would recreate that same failure for whatever fell past the cut, and the cut would land by
- * directory order, since discovery does not sort — so which agents the model could see would depend
- * on the filesystem. The list is built once per start, so its size is paid for in the prefix once
- * rather than per call.
- *
- * Only the name and its own description are included. Model, thinking level, and tools are how an
- * agent is built rather than what it is for, and the caller is choosing between agents.
- */
+/** Formats the complete discovered agent catalog for the tool description. */
 export function formatAgentCatalog(agents: readonly AgentConfig[]): string {
 	if (agents.length === 0) return "No agents are currently installed.";
 
 	const listed = agents.map((agent) => {
-		// Descriptions are free-form frontmatter, and a multi-line one would otherwise break up a
-		// description that is assembled as a single line.
+		// Normalize descriptions so the catalog remains one line.
 		const summary = agent.description.replace(/\s+/g, " ").trim();
 		return summary ? `${agent.name} — ${summary}` : agent.name;
 	});

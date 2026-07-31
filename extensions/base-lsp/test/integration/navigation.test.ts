@@ -88,7 +88,7 @@ describe("location normalization", () => {
     await writeFile(path, "const alpha = 1;\nconsole.log(alpha);\n");
     const uri = pathToFileURL(path).href;
     const good = { uri, range: { start: { line: 1, character: 12 }, end: { line: 1, character: 17 } } };
-    // A stale server index can report a range past the end of the file as it exists now.
+    // Stale indexes can report ranges beyond the current file.
     const stale = { uri, range: { start: { line: 40, character: 0 }, end: { line: 40, character: 3 } } };
     const result = await normalizeLocations([good, stale], root, root, "utf-16", 10);
     expect(result.locations).toHaveLength(2);
@@ -106,7 +106,7 @@ describe("location normalization", () => {
     const result = await normalizeLocations([malformed, malformed], root, root, "utf-16", 10);
     expect(result.locations).toHaveLength(0);
     expect(result.truncated).toBe(false);
-    // Dropping unrecognizable entries must stay visible even though it is not truncation.
+    // Dropped entries must remain distinguishable from truncation.
     expect(result.rejected).toBe(2);
     expect(result.total).toBe(2);
 
@@ -120,8 +120,7 @@ describe("location normalization", () => {
     const path = join(root, "a.ts");
     await writeFile(path, "const alpha = 1;\nconsole.log(alpha);\n");
     const uri = pathToFileURL(path).href;
-    // targetRange fits the file, but the selection range names a column past the end of its line —
-    // what a server reports when its index predates an edit. The selection range must not vanish.
+    // A stale selection range must not remove a valid target range.
     const link = {
       targetUri: uri,
       targetRange: { start: { line: 1, character: 0 }, end: { line: 1, character: 0 } },
@@ -135,7 +134,7 @@ describe("location normalization", () => {
     expect(item.rawRange).toBeUndefined();
     expect(item.selectionRange).toBeUndefined();
     expect(item).toMatchObject({ selectionRangeUnresolved: "out-of-range", rawSelectionRange: { start: { line: 1, character: 400 } } });
-    // The origin range converts against the origin text, so it is unaffected by the target failure.
+    // Origin conversion uses different text and remains valid.
     expect(item.originSelectionRange).toMatchObject({ start: { line: 1, character: 7 } });
     expect(item.originSelectionRangeUnresolved).toBeUndefined();
   });
@@ -146,7 +145,7 @@ describe("location normalization", () => {
     await writeFile(path, "");
     const uri = pathToFileURL(path).href;
     const result = await normalizeLocations({ uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } }, root, root, "utf-16", 10);
-    // An empty file was read successfully, so this is not "text-unavailable".
+    // A successfully read empty file is not text-unavailable.
     expect(result.locations[0]).toMatchObject({ external: false, range: { start: { line: 1, character: 1 } } });
     expect(result.locations[0]!.rangeUnresolved).toBeUndefined();
   });

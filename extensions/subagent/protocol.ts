@@ -41,7 +41,7 @@ export function discoverExtensionAgents(
 			},
 		} satisfies ExtensionAgentDiscoveryRequest);
 	} catch {
-		// A faulty contributor must not prevent built-in user/project discovery.
+		// Ignore one faulty contributor so built-in discovery still succeeds.
 	}
 	return [...contributions.values()];
 }

@@ -10,7 +10,7 @@ describe("server file matching", () => {
   const overlapping = () => ({ ...fakeServer(), extensions: [".ts", ".d.ts"], languageIds: { ".ts": "typescript", ".d.ts": "declarations" } });
 
   it("resolves the most specific extension, not the first listed", () => {
-    // Extension order is cached per definition; this pins the ordering that cache must preserve.
+    // Pin ordering preserved by the per-definition cache.
     expect(languageIdFor(overlapping(), "/repo/types.d.ts")).toBe("declarations");
     expect(languageIdFor(overlapping(), "/repo/main.ts")).toBe("typescript");
     expect(languageIdFor({ ...overlapping(), extensions: [".d.ts", ".ts"] }, "/repo/types.d.ts")).toBe("declarations");
@@ -23,7 +23,7 @@ describe("server file matching", () => {
   });
 
   it("keeps cached extension order separate per definition", () => {
-    // Distinct objects sharing an id must not share a cache entry; config reloads rebuild them.
+    // Cache keys use definition identity, not only server ID.
     const wide = overlapping();
     const narrow = { ...overlapping(), extensions: [".ts"], languageIds: { ".ts": "typescript" } };
     expect(languageIdFor(wide, "/repo/types.d.ts")).toBe("declarations");
@@ -32,10 +32,7 @@ describe("server file matching", () => {
   });
 
   it("sorts each server's extensions at most once, however many paths it sees", () => {
-    // Discovery tests every entry against every enabled server, so copying and sorting a server's
-    // extension list per call was hundreds of milliseconds of pure string work on a full-budget
-    // sweep, before a single file was stat'd. Counting sorts pins that directly, where a wall-clock
-    // bound on a roughly twofold win would only be flaky.
+    // Assert sort reuse structurally instead of with flaky timing.
     const servers = Object.values(BUILTIN_SERVERS);
     const suffixes = [".ts", ".py", ".json", ".md", ".lock", ".png", ".txt", ".toml", ".snap", ""];
     const paths = Array.from({ length: 2_000 }, (_, index) => `/repo/src/pkg${index % 50}/file${index}${suffixes[index % suffixes.length]}`);
@@ -44,11 +41,11 @@ describe("server file matching", () => {
     let matched = 0;
     for (const path of paths) if (servers.some((server) => matchesServerFile(server, path))) matched += 1;
     expect(matched).toBe(600);
-    // A yes/no answer needs no ordering at all.
+    // Boolean matching does not require ordering.
     expect(sort).not.toHaveBeenCalled();
 
     for (const path of paths) for (const server of servers) languageIdFor(server, path);
-    // Longest-match does need it — once per definition, not once per call.
+    // Longest-match ordering is needed once per definition.
     expect(sort.mock.calls.length).toBeLessThanOrEqual(servers.length);
   });
 });

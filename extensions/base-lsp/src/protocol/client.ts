@@ -101,11 +101,7 @@ export class LspClient {
   onDiagnosticRefresh(listener: () => void): () => void { this.diagnosticRefreshListeners.add(listener); return () => this.diagnosticRefreshListeners.delete(listener); }
   /** Fires when a document is synchronized with content this server has not seen before. */
   onDocumentChanged(listener: (path: string) => void): () => void { this.documentChangeListeners.add(listener); return () => this.documentChangeListeners.delete(listener); }
-  /**
-   * Fires once. A listener registered after the client has already stopped is invoked immediately:
-   * the stop it was waiting for has happened, and a listener parked in the cleared set would never
-   * run, silently stranding whatever state it was meant to release.
-   */
+  /** Fires once; late listeners run immediately so shutdown cannot strand state. */
   onStop(listener: () => void): () => void {
     if (this.stoppedEmitted) { listener(); return () => undefined; }
     this.stopListeners.add(listener); return () => this.stopListeners.delete(listener);

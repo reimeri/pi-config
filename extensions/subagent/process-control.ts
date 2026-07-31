@@ -16,8 +16,7 @@ export interface TerminationOptions {
 	onUnterminated?: () => void;
 }
 
-// ChildProcess.killed only means kill() successfully sent a signal. It does not
-// mean the process exited, so use the exit/signal status instead.
+// killed means signal delivery succeeded; exitCode/signalCode prove termination.
 function hasExited(process: KillableChildProcess): boolean {
 	return process.exitCode !== null || process.signalCode !== null;
 }
@@ -26,17 +25,11 @@ function trySignal(process: KillableChildProcess, signal: "SIGTERM" | "SIGKILL")
 	try {
 		process.kill(signal);
 	} catch {
-		// A signal that cannot be delivered must not escape into the abort listener
-		// that asked for termination. The escalation below reports it instead.
+		// Swallow undeliverable signals so escalation reports the failure.
 	}
 }
 
-/**
- * Send SIGTERM now and SIGKILL after the grace period if the child is still
- * alive. If it also survives SIGKILL, signals are not reaching it (EPERM after
- * a credential change, an uninterruptible state), so it will never emit "close"
- * and `onUnterminated` tells the caller to stop waiting for one.
- */
+/** Escalates SIGTERM to SIGKILL and reports children that still do not exit. */
 export function terminateWithEscalation(
 	process: KillableChildProcess,
 	{ graceMs = CHILD_TERMINATION_GRACE_MS, onUnterminated }: TerminationOptions = {},

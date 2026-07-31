@@ -1,7 +1,3 @@
-/**
- * Child-run results: how a finished subagent run is classified and rendered into
- * the text the parent agent reads.
- */
 
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentSource } from "./agents.ts";
@@ -39,17 +35,7 @@ export interface SingleResult {
 	childOutlivedRun?: boolean;
 }
 
-/**
- * The note telling the parent how far a reused session has grown.
- *
- * A resumed child accumulates context across runs, so the parent needs to see that number to know
- * when a sequence has gone on long enough to warrant a fresh key — otherwise the first sign is the
- * run that stops against its output limit.
- *
- * A key with no run number is one the tool could not honour. That has to be said out loud: the
- * parent wrote its task as a delta against context the child turns out not to have, so a reply that
- * misses the point is the tool's doing rather than the agent's.
- */
+/** Formats session reuse status and run number for the parent. */
 export function formatSessionNote(result: SingleResult, formatTokens: (count: number) => string): string {
 	if (!result.session) return "";
 	const { key, run } = result.session;
@@ -60,23 +46,11 @@ export function formatSessionNote(result: SingleResult, formatTokens: (count: nu
 	return `[Subagent session "${key}", run ${run}${size}.]`;
 }
 
-/**
- * A child message reduced to the parts the parent will actually render.
- *
- * Everything here is stored per run and persisted with the tool result, so what is kept is paid for
- * in session file size, load time, and export time for the life of the conversation. Only assistant
- * text and tool calls are ever read back — by `getDisplayItems` and `getFinalOutput` — so reasoning
- * is dropped, and so is every tool result, whose output the renderers never look at. Measured over
- * real sessions those two were 94% of the stored bytes.
- *
- * The tool *call* survives, so an aborted editing run still records which files it was working on.
- * Returns undefined for a message with nothing worth keeping.
- */
+/** Retains assistant text and tool calls needed by renderers, excluding thinking and tool results. */
 export function messageForDisplay(message: Message): Message | undefined {
 	if (message.role !== "assistant") return undefined;
 	const content = message.content.filter((part) => part.type !== "thinking");
-	// A turn that errored or was aborted mid-reasoning is nothing but thinking, and what is left of it
-	// once that goes is a message no renderer can show: metadata paid for in bytes, for nothing.
+	// Drop messages that become invisible after thinking is removed.
 	if (content.length === 0) return undefined;
 	return { ...message, content };
 }
@@ -116,11 +90,7 @@ export function failureResult(params: {
 	};
 }
 
-/**
- * `length` means the child was cut off by its output limit, mid-run. Its work is
- * unfinished and whatever text it had emitted is not a completion report, so it
- * must not reach the parent as a success.
- */
+/** Treat output-limit termination as unfinished regardless of exit code. */
 export function isFailedResult(result: SingleResult): boolean {
 	return (
 		result.exitCode !== 0 ||
@@ -136,15 +106,10 @@ export function describeFailure(result: SingleResult): string {
 		case "length":
 			return "hit its output limit mid-run: the work it describes is incomplete and any files it touched may be half-edited";
 		case "aborted":
-			// A child that outlived the run is the one case where no message proves anything: the run
-			// stopped reading its output while it was still alive, so what it does next is unknown and
-			// unbounded rather than merely unrecorded.
+			// A live child may continue producing unknown changes after reading stops.
 			if (result.childOutlivedRun)
 				return "was aborted but its child did not exit: it may still be running and changing files";
-			// A child cannot have edited anything without first emitting the assistant turn that
-			// requested the tool, so an abort with no messages — one that landed while the run was
-			// still queued for its concurrency group or session — is known to have changed nothing.
-			// Warning about files either way would train the parent to ignore the warning.
+			// No messages means no tool call was requested, so a queued abort cannot have edited files.
 			return result.messages.length === 0
 				? "was aborted before it started, leaving the workspace untouched"
 				: "was aborted: it may have already changed files";
@@ -168,14 +133,7 @@ export function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
-/**
- * What the parent agent is given for a run.
- *
- * On the failure path the child's text is deliberately labelled rather than
- * returned bare: an aborted or truncated run ends on whatever it happened to be
- * narrating, and that reads exactly like a completion report. The parent has to
- * be able to tell the difference.
- */
+/** Formats parent-visible output, labeling failures and partial output. */
 export function getResultOutput(result: SingleResult): string {
 	if (!isFailedResult(result)) return getFinalOutput(result.messages) || "(no output)";
 

@@ -78,8 +78,7 @@ describe("code actions", () => {
       const preview = await execute(codeActions, { path: a, line: 1, symbol: "ERROR", title: "Fix ERROR" });
       const actionId = preview.details.actionId;
       expect(runtime.previewActions.has(actionId)).toBe(true);
-      // A request that fails before anything is applied — here an unresolvable symbol — must leave
-      // the token alone: the action was never applied, so forcing a fresh preview would be wrong.
+      // A pre-apply failure leaves the preview token reusable.
       await expect(execute(codeActions, { path: a, line: 1, symbol: "nowhere", title: "Fix ERROR", apply: true, actionId })).rejects.toThrow();
       expect(runtime.previewActions.has(actionId)).toBe(true);
       const applied = await execute(codeActions, { path: a, line: 1, symbol: "ERROR", title: "Fix ERROR", apply: true, actionId });
@@ -149,8 +148,7 @@ describe("rename", () => {
       expect(runtime.previewRenames.has(renameId)).toBe(true);
       const applied = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta", apply: true, renameId });
       expect(applied.details.applied).toBe(true);
-      // Applied once, the token is spent: replaying it must require a fresh preview against the
-      // file as it now stands.
+      // Applied tokens are spent; replay requires a fresh preview.
       expect(runtime.previewRenames.has(renameId)).toBe(false);
       await expect(execute(rename, { path: a, line: 1, symbol: "beta", newName: "gamma", apply: true, renameId })).rejects.toThrow(/not previewed/);
     } finally { await manager.shutdown(); }
@@ -162,8 +160,7 @@ describe("rename", () => {
       const route: Route = { server, root, resolution: { root, distance: 0, markerPriority: 0 }, specificity: 1 };
       const client = await manager.acquire(route); await client.documents!.sync(a); await client.documents!.sync(b);
       const preview = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta" });
-      // The first response covered a.ts alone; stability confirmation must discard it rather than
-      // publish a half-finished rename, and settle on the complete two-file edit.
+      // Discard the partial response and wait for the complete stable edit.
       expect(preview.details).toMatchObject({ stable: true, applicable: true, attempts: 3 });
       expect(preview.details.files).toHaveLength(2);
       const applied = await execute(rename, { path: a, line: 1, symbol: "alpha", newName: "beta", apply: true, renameId: preview.details.renameId });

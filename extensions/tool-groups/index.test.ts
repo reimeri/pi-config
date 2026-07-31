@@ -4,10 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-// Global extensions rely on Pi's loader aliases rather than a local node_modules, so the test's
-// direct TUI import is resolved against the active installation. Both layouts are checked at each
-// level: node keeps global packages under `lib/node_modules`, while a bun binary is itself installed
-// inside `node_modules` and so reaches it by walking up alone.
+// Resolve Pi from the host installation under Node and Bun layouts.
 function findGlobalModules(): string {
 	let current = dirname(process.execPath);
 	while (true) {
@@ -165,8 +162,7 @@ describe("tool-groups extension", () => {
 			expect(singleRoot.render(100)).toEqual(["FULL:read"]);
 			expect(root.render(0)).toEqual([]);
 
-			// Exact equality, not a substring: a header above expanded output costs a full
-			// clear-and-repaint on every status change, so nothing may be added at all.
+			// Expanded groups omit off-screen headers to avoid full transcript repaint.
 			readTool.expanded = true;
 			bashTool.expanded = true;
 			expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
@@ -184,7 +180,7 @@ describe("tool-groups extension", () => {
 				mode: "all",
 			});
 
-			// Match Pi's real reload order: old shutdown, new module load, new start.
+			// Match Pi's reload order: shutdown, load, start.
 			await first.shutdown?.({ reason: "reload" }, ctx);
 			const second = await loadGeneration();
 			await second.start?.({ reason: "reload" }, ctx);
@@ -228,8 +224,7 @@ describe("tool-groups extension", () => {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 
-		// The stable global wrapper remains, but shutdown removes this generation's
-		// controller so normal Container rendering is restored byte-for-byte.
+		// Shutdown removes only this generation's controller and restores normal rendering.
 		expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
 	});
 });

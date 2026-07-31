@@ -9,7 +9,7 @@ function findPiEntry() {
   try {
     return createRequire(import.meta.url).resolve("@earendil-works/pi-coding-agent");
   } catch {
-    // Bare global-extension setups intentionally do not install a second Pi copy here.
+    // Do not install a second Pi copy for global extensions.
   }
   let current = dirname(process.execPath);
   while (true) {
@@ -23,17 +23,14 @@ function findPiEntry() {
   }
 }
 
-// Deliberately .mjs, not .ts: Pi loads every top-level *.ts and *.js file in this directory as an
-// extension, and `endsWith(".ts")` matches .mts too. A .mjs config is invisible to that scan.
+// Use .mjs because Pi scans top-level .ts/.js files as extensions.
 export default defineConfig({
   resolve: {
-    // Bare extensions use Pi's host-provided packages at runtime. Point tests at that same active
-    // installation without adding a second Pi copy to this intentionally minimal test harness.
+    // Use the host-provided packages used by bare extensions at runtime.
     alias: { "@earendil-works/pi-coding-agent": findPiEntry() },
   },
   test: {
-    // base-lsp carries its own package.json, vitest config and dependencies, so it is run from
-    // there rather than swept up here.
+    // Run base-lsp separately because it has its own dependencies and config.
     include: ["*/**/*.test.ts"],
     exclude: ["base-lsp/**", "**/node_modules/**"],
     testTimeout: 20_000,

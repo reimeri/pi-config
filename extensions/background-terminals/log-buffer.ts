@@ -175,8 +175,6 @@ export class BoundedLogBuffer {
 				cursor < earliest,
 			);
 		}
-		// Both bounded forms are handled above, so this is the unbounded read: every
-		// retained byte from the cursor onward, with no tail or byte limit to apply.
 		const requestedCursor = cursor ?? earliest;
 		const effectiveCursor = Math.max(earliest, Math.min(requestedCursor, this.nextCursorValue));
 		const droppedBefore = requestedCursor < earliest;

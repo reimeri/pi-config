@@ -52,8 +52,7 @@ function result(overrides: Partial<SingleResult> = {}): SingleResult {
 
 describe("isFailedResult", () => {
 	test("treats an output-limit cutoff as a failure", () => {
-		// The child exits 0 when the model runs out of output budget, so exit code alone reported a
-		// worker that stopped mid-edit as a completed leaf task.
+		// Exit code 0 does not imply completion when the model hit its output limit.
 		expect(isFailedResult(result({ exitCode: 0, stopReason: "length" }))).toBe(true);
 	});
 
@@ -81,16 +80,14 @@ describe("describeFailure", () => {
 	});
 
 	test("does not warn about files when the abort landed before the child spoke", () => {
-		// A run aborted while queued for its group never spawned, and warning about the workspace
-		// anyway is how a warning stops being read.
+		// A run aborted before spawning must not warn about workspace changes.
 		const text = describeFailure(result({ stopReason: "aborted" }));
 		expect(text).toContain("before it started");
 		expect(text).not.toContain("may have already changed files");
 	});
 
 	test("says the child may still be running when it outlived the run", () => {
-		// Silence here is not evidence: the run stopped reading a child that is still alive, so an
-		// empty message list says nothing about what that child is about to edit.
+		// Empty messages do not prove a live child made no changes.
 		const text = describeFailure(result({ stopReason: "aborted", childOutlivedRun: true }));
 		expect(text).toContain("did not exit");
 		expect(text).not.toContain("untouched");
@@ -108,8 +105,7 @@ describe("getResultOutput", () => {
 	});
 
 	test("labels the trailing text of a truncated run instead of passing it off as a report", () => {
-		// A cut-off worker ends on whatever it was narrating, which reads exactly like a completion
-		// report. The parent has to be able to tell the two apart.
+		// Label partial output so it cannot be mistaken for completion.
 		const messages: Message[] = [
 			assistant([{ type: "text", text: "## Completed\nMigrated every call site." }], "length"),
 		];
@@ -191,8 +187,7 @@ describe("messageForDisplay", () => {
 	});
 
 	test("leaves nothing that getDisplayItems would have shown", () => {
-		// The filter and the renderers have to agree: anything dropped here must be something
-		// getDisplayItems would have ignored anyway.
+		// Filtered messages must match what renderers ignore.
 		const message = assistant([
 			{ type: "thinking", thinking: "private" } as AssistantMessage["content"][number],
 			{ type: "text", text: "visible" },
@@ -246,8 +241,7 @@ describe("formatSessionNote", () => {
 	});
 
 	test("tells the parent when the key could not be honoured", () => {
-		// The parent wrote its task as a delta against context the child turns out not to have, so
-		// silence here would let a reply that misses the point read as the agent's own judgement.
+		// Report unavailable context so a delta task is not mistaken for agent judgment.
 		const note = formatSessionNote(withSession({ key: "auth" }), tokens);
 		expect(note).toContain('"auth" was unavailable');
 		expect(note).toContain("fresh context");

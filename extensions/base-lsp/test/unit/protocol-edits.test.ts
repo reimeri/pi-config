@@ -41,7 +41,7 @@ describe("bounded protocol reader", () => {
     reader.onError((error) => errors.push(error)); reader.listen((message) => messages.push(message));
     const body = JSON.stringify({ jsonrpc: "2.0", id: 7, result: "ok" });
     const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
-    // Cut between the two CRLF pairs, the one place a naive scan can lose the frame boundary.
+    // Split between CRLF pairs to exercise frame-boundary retention.
     const cut = frame.indexOf("\r\n\r\n") + 2;
     stream.write(frame.slice(0, cut)); stream.write(frame.slice(cut));
     await new Promise((resolve) => setImmediate(resolve));
@@ -49,8 +49,7 @@ describe("bounded protocol reader", () => {
   });
 
   it("reclaims space across a long run of frames rather than growing without bound", async () => {
-    // Each frame is a sizeable fraction of the reader's working buffer, so consuming them has to
-    // slide the remainder down; a reader that only ever appended would balloon instead.
+    // Consuming frames must compact the remainder instead of appending indefinitely.
     const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 1024, maxBodyBytes: 128 * 1024 });
     const messages: any[] = []; const errors: Error[] = [];
     reader.onError((error) => errors.push(error)); reader.listen((message) => messages.push(message));
@@ -66,8 +65,7 @@ describe("bounded protocol reader", () => {
   });
 
   it("accumulates a large body in linear time", async () => {
-    // Concatenating the whole retained buffer per chunk cost ~576ms for this input; the copying is
-    // now amortised to one pass over the bytes received.
+    // Exercise the amortized-copy path replacing per-chunk whole-buffer concatenation.
     const payload = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { data: "x".repeat(8 * 1024 * 1024) } });
     const frame = Buffer.from(`Content-Length: ${Buffer.byteLength(payload)}\r\n\r\n${payload}`, "utf8");
     const stream = new PassThrough(); const reader = new BoundedStreamMessageReader(stream, { maxHeaderBytes: 64 * 1024, maxBodyBytes: 64 * 1024 * 1024 });
@@ -93,12 +91,9 @@ describe("workspace edits", () => {
   });
 
   it("assembles the same text a per-edit splice would, across randomized edit sets", async () => {
-    // The staged text is what gets written to the user's files, so the single forward pass has to
-    // agree with the obvious splice-each-edit-in-reverse reference on every shape: insertions,
-    // deletions, replacements, edits meeting end-to-start, and edits at both boundaries.
+    // Compare the forward pass with reverse splicing across all edit shapes.
     const root = await mkdtemp(join(tmpdir(), "base-lsp-edit-fuzz-"));
-    // Multi-byte but single-unit characters, so every character offset is a legal boundary; astral
-    // characters appear in the replacement text, which is inserted rather than indexed into.
+    // Keep indexed characters single-unit; use astral characters only in inserted text.
     const lines = Array.from({ length: 40 }, (_, index) => `const value${index} = compute(${index}, "héllo → wörld");`);
     const original = `${lines.join("\n")}\n`;
     const file = join(root, "fuzz.ts");
@@ -109,7 +104,7 @@ describe("workspace edits", () => {
     const rand = (n: number): number => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
 
     for (let trial = 0; trial < 120; trial++) {
-      // Non-overlapping ranges within one line, walking forward so they can touch but never cross.
+      // Generate forward, non-overlapping ranges that may touch.
       const edits = [];
       const line = rand(lines.length);
       const width = lines[line]!.length;
@@ -127,8 +122,7 @@ describe("workspace edits", () => {
       const manifest = await normalizeWorkspaceEdit({ changes: { [uri]: edits } }, root, "utf-16", DEFAULT_LIMITS);
       expect(manifest.applicable, `trial ${trial}`).toBe(true);
 
-      // Reference: splice each edit into an accumulating string, highest offset first, exactly as
-      // the previous implementation did.
+      // Reference implementation: reverse-order splicing.
       const offsets = edits.map((edit, index) => {
         const lineStart = original.split("\n").slice(0, edit.range.start.line).join("\n").length + (edit.range.start.line > 0 ? 1 : 0);
         return { start: lineStart + edit.range.start.character, end: lineStart + edit.range.end.character, text: edit.newText, index };
@@ -148,7 +142,7 @@ describe("workspace edits", () => {
     await writeFile(file, original);
     const uri = pathToFileURL(file).href;
     const edit = { changes: { [uri]: [{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 11 } }, newText: "LSP" }] } };
-    // Take the canonical path from a snapshot-free pass so the comparison cannot trip on symlinks.
+    // Use a snapshot-free canonical path so symlinks cannot affect comparison.
     const canonicalPath = (await normalizeWorkspaceEdit(edit, root, "utf-16", DEFAULT_LIMITS)).files[0]!.path;
     const snapshot = { uri, canonicalPath, version: 1, text: original, contentHash: stableHash(original) };
 

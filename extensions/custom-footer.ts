@@ -3,8 +3,7 @@ import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-// This mirrors Pi's built-in FooterComponent so the requested field changes do
-// not discard its layout, provider/model details, or extension status line.
+// Preserve Pi's footer layout and status details while replacing requested fields.
 function formatTokens(count: number): string {
 	if (count < 1_000) return count.toString();
 	if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
@@ -100,9 +99,7 @@ export default function customFooterExtension(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
-		// render() runs on every keystroke, so walking the whole session each time makes
-		// typing latency grow with session length. Totals only change when the branch
-		// leaf advances, which is an O(1) check.
+		// Cache totals by branch leaf; render runs on every keystroke.
 		let cachedTotals: SessionTotals | undefined;
 		let cachedLeafId: string | null | undefined;
 		const sessionTotals = (): SessionTotals => {
@@ -115,7 +112,7 @@ export default function customFooterExtension(pi: ExtensionAPI) {
 
 		ctx.ui.setFooter((tui, theme, footerData) => ({
 			dispose: footerData.onBranchChange(() => {
-				// A branch switch can land on the same leaf id with different entries.
+				// The same leaf ID may refer to different entries after a branch switch.
 				cachedTotals = undefined;
 				tui.requestRender();
 			}),

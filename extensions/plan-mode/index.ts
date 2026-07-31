@@ -1,21 +1,4 @@
-/**
- * Plan Mode Extension
- *
- * Exploration mode that steers the agent toward planning instead of implementing.
- * When enabled, built-in write tools are disabled.
- *
- * NOT a security boundary. Plan mode is a nudge, not a sandbox: only `bash` is
- * allowlisted, so tools that reach a shell by another route (background_start,
- * subagent) stay active, and the allowlist itself is pattern-based rather than
- * airtight. Use quarantine for an enforced restriction — it applies an absolute
- * policy plus a default-deny tool_call gate. See README.md.
- *
- * Features:
- * - /plan command or Ctrl+Alt+P to toggle
- * - Bash restricted to allowlisted read-only commands
- * - Extracts numbered plan steps from "Plan:" sections
- * - Creates canonical execution TODOs through the todos extension
- */
+/** Plan mode is advisory, not a security boundary; use quarantine for enforced restrictions. */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
@@ -34,7 +17,6 @@ import {
 import { MAX_TODOS, requestTodosFromPlan } from "../todos/protocol.ts";
 import { extractPlanSteps, isSafeCommand, planModeInstructions } from "./utils.ts";
 
-// Tools
 const TODO_TOOL_NAME = "todo_update";
 const PLAN_MODE_STATE_VERSION = 2;
 const PLAN_MODE_TOOLS = ["read", "bash", "grep", "find", "ls"];
@@ -58,12 +40,10 @@ function parsePlanModeState(value: unknown, knownTools: Set<string>): PlanModeSt
 	return { version: PLAN_MODE_STATE_VERSION, enabled: state.enabled, toolsBeforePlanMode };
 }
 
-// Type guard for assistant messages
 function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
 	return m.role === "assistant" && Array.isArray(m.content);
 }
 
-// Extract text content from an assistant message
 function getTextContent(message: AssistantMessage): string {
 	return message.content
 		.filter((block): block is TextContent => block.type === "text")
@@ -83,7 +63,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 	});
 
 	function updateModeIndicator(ctx: ExtensionContext): void {
-		// Clear footer state left by older versions that rendered modes there.
+		// Clear footer state left by older versions.
 		ctx.ui.setStatus("plan-mode", undefined);
 		setEditorTopBarMode(pi, "plan-mode", planModeEnabled ? "⏸️ plan" : undefined, {
 			compactLabel: "⏸️",
@@ -132,8 +112,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
 	function persistState(ctx: ExtensionContext): void {
 		try {
-			// Kept for backward compatibility. The coordinator entry is the
-			// canonical state for coordinated mode restoration.
+			// Retain the legacy entry for compatibility; coordinator state is canonical.
 			pi.appendEntry("plan-mode", {
 				version: PLAN_MODE_STATE_VERSION,
 				enabled: planModeEnabled,
@@ -175,7 +154,6 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	// Block destructive bash commands in plan mode
 	pi.on("tool_call", async (event) => {
 		if (!planModeEnabled || event.toolName !== "bash") return;
 
@@ -188,10 +166,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		}
 	});
 
-	// Strip context left by earlier plan-mode implementations, which carried these
-	// instructions as messages. Nothing here reads the current mode: the filter has
-	// to return the same messages on every turn, or it moves the prompt's
-	// divergence point and re-bills the conversation behind it.
+	// Filter legacy messages deterministically so prompt-cache boundaries do not move.
 	pi.on("context", async (event) => {
 		return {
 			messages: event.messages.filter((m) => {
@@ -221,14 +196,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		};
 	});
 
-	// Carry plan context in the system prompt rather than a per-turn message, so it
-	// stays byte-identical for as long as the mode is on.
+	// Keep plan context in the system prompt so it remains byte-identical across turns.
 	pi.on("before_agent_start", async (event) => {
 		if (!planModeEnabled) return;
 		return { systemPrompt: `${event.systemPrompt}\n\n${planModeInstructions(planModeCanAskUser)}` };
 	});
 
-	// Extract a completed plan and offer to execute or refine it.
 	pi.on("agent_end", async (event, ctx) => {
 		if (!planModeEnabled || !ctx.hasUI) return;
 
@@ -273,9 +246,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			// Leave plan mode before replacing TODOs. Replacing the user's unfinished
-			// list is the destructive step; the mode switch is the reversible one, so it
-			// has to go first or a failed switch strands an already-destroyed TODO list.
+			// Leave plan mode before replacing TODOs so a failed switch cannot strand a destroyed list.
 			if (
 				!(await setPlanModeTools(false, ctx, {
 					baselinePatch: { add: [TODO_TOOL_NAME] },
@@ -361,7 +332,6 @@ Return the complete revised plan under a "Plan:" header. Do not implement it.`;
 		updateModeIndicator(ctx);
 	}
 
-	// Restore branch-aware plan-mode state on session start/resume and tree navigation.
 	pi.on("session_start", async (_event, ctx) => {
 		await restoreState(ctx, pi.getFlag("plan") === true);
 	});

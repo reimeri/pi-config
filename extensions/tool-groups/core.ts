@@ -154,8 +154,7 @@ export function installContainerRenderController(
 		prototype[patchKey] = state;
 	}
 
-	// Both fields are replaced on every extension generation. The tiny permanent
-	// routing wrapper remains, but it retains no stale controller or dispatch code.
+	// Keep the wrapper stable while clearing stale generation state.
 	state.controller = controller;
 	state.dispatch = renderContainerWithGroups;
 	return state;

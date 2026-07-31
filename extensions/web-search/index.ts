@@ -11,7 +11,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
 	pi.on("session_tree", (_event, ctx) => toolManager.sync(ctx.model));
 	pi.on("model_select", (event) => toolManager.sync(event.model));
 
-	// Defense in depth if another extension reactivates a model-incompatible tool.
+	// Recheck compatibility if another extension reactivates a tool.
 	pi.on("tool_call", (event, ctx) => {
 		if (event.toolName === "url_context" && ctx.model?.api !== "google-generative-ai") {
 			return {

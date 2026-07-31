@@ -10,8 +10,7 @@ describe("supervisor agent prompts", () => {
 		const worker = loadAgentFromFile(workerPath, "extension", "supervisor");
 
 		expect(worker).toBeDefined();
-		// The supervisor is told to reconcile worker's reported files against what the tool observed,
-		// which only happens when the worker agent opts into workspace capture.
+		// Reconcile reported files only when workspace capture was requested.
 		expect(worker?.captureDiff).toBe(true);
 		expect(worker?.systemPrompt).toContain("## Scope gate");
 		expect(worker?.systemPrompt).toContain("explicit Goal naming one primary, independently reviewable outcome");
@@ -29,7 +28,7 @@ describe("supervisor agent prompts", () => {
 		expect(worker?.systemPrompt).toContain("## Suggested Split");
 		expect(worker?.systemPrompt).toContain("## Acceptance Criteria");
 		expect(worker?.systemPrompt).toContain("Do not continue into a likely next task");
-		// A resumed worker carries its own earlier suggestions, which must not read as authority.
+		// A resumed worker's prior suggestions are not authoritative.
 		expect(worker?.systemPrompt).toContain("You may be resumed with your earlier tasks still in context");
 		expect(worker?.systemPrompt).toContain("An earlier Recommended Next Task is not an assignment");
 	});

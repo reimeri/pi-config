@@ -48,8 +48,7 @@ describe("AgentConcurrencyGate", () => {
 	});
 
 	test("hands the key to a waiter when the holder releases", async () => {
-		// The point of the whole change: a second worker launched while the first is running follows
-		// it instead of failing and making the model spend a turn discovering that.
+		// A busy group queues the second worker instead of rejecting it.
 		const gate = new AgentConcurrencyGate();
 		const release = await hold(gate);
 
@@ -95,8 +94,7 @@ describe("AgentConcurrencyGate", () => {
 		await Promise.resolve();
 
 		release();
-		// The handoff is synchronous with the release, so by the time anyone else can ask, the key is
-		// held again. Barging would mean a waiter sitting through another full run.
+		// Synchronous handoff prevents new arrivals from bypassing waiters.
 		expect(await gate.acquire(GROUP)).toEqual({ ok: false, reason: "busy" });
 		expect((await queued).ok).toBe(true);
 	});
@@ -108,13 +106,13 @@ describe("AgentConcurrencyGate", () => {
 		expect(await gate.acquire(GROUP, { timeoutMs: 20 })).toEqual({ ok: false, reason: "busy" });
 		expect(gate.waiting(GROUP)).toBe(0);
 
-		// The key that timed out must not be handed to the caller that already walked away.
+		// Remove a timed-out waiter before handing off the key.
 		release();
 		expect(gate.isActive(GROUP)).toBe(false);
 	});
 
 	test("stops waiting as soon as the run is aborted", async () => {
-		// Otherwise pressing escape on a queued worker does nothing until the timeout expires.
+		// Abort must remove a queued worker immediately.
 		const gate = new AgentConcurrencyGate();
 		await hold(gate);
 		const controller = new AbortController();
@@ -134,9 +132,7 @@ describe("AgentConcurrencyGate", () => {
 	});
 
 	test("abandoning a key fails its waiters now rather than at the end of the timeout", async () => {
-		// A child that outlived its run keeps its session file open for the rest of the conversation.
-		// Waiting for it is not slow, it is futile, and the parent needs to hear that while it can
-		// still choose another key.
+		// Report abandonment immediately because the child may never exit.
 		const gate = new AgentConcurrencyGate();
 		await hold(gate, "session-1");
 		const queued = gate.acquire("session-1", { timeoutMs: 60_000 });
@@ -149,8 +145,7 @@ describe("AgentConcurrencyGate", () => {
 	});
 
 	test("dropping waiters releases the key without handing it to the queue", async () => {
-		// The holder whose child outlived the run: it has to give the group back, but the queue must
-		// not inherit it, or a second worker starts editing beside a child that is still alive.
+		// Do not hand the group to another worker while the abandoned child may still edit.
 		const gate = new AgentConcurrencyGate();
 		const release = await hold(gate);
 		const queued = gate.acquire(GROUP, { timeoutMs: 60_000 });

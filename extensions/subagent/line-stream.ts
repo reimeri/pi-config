@@ -1,24 +1,6 @@
 import { StringDecoder } from "node:string_decoder";
 
-/**
- * Assembles newline-delimited lines from raw process output.
- *
- * Two properties matter for a subagent's JSON event stream, and the obvious
- * `buffer += chunk.toString(); buffer.split("\n")` loop has neither:
- *
- * - A chunk boundary may fall inside a multi-byte UTF-8 sequence. Decoding each
- *   chunk on its own replaces that character with U+FFFD. The line still parses,
- *   because non-ASCII only ever appears inside JSON string values, so the damage
- *   is silent: the subagent's text arrives as mojibake. The decoder holds an
- *   incomplete sequence back until its remaining bytes arrive.
- * - Re-splitting an accumulating buffer costs O(buffer) per chunk, so a single
- *   long line — a large tool result, say — is quadratic to receive. Newlines are
- *   searched for within each arriving chunk instead, and the retained fragments
- *   are joined once, when their line completes.
- *
- * Lines are delivered without their trailing newline; a blank line is delivered
- * as an empty string rather than skipped, leaving that policy to the consumer.
- */
+/** Decodes UTF-8 incrementally and emits newline-delimited lines without quadratic buffering. */
 export class LineStream {
 	private readonly decoder = new StringDecoder("utf8");
 	private pending: string[] = [];
@@ -37,8 +19,7 @@ export class LineStream {
 			newline = decoded.indexOf("\n", lineStart);
 		}
 
-		// Whatever follows the last newline is the new pending line. When the chunk held no
-		// newline at all it merely extends the line already in progress.
+		// Retain the fragment after the last newline for the next chunk.
 		if (lineStart > 0) {
 			const tail = decoded.slice(lineStart);
 			this.pending = tail ? [tail] : [];

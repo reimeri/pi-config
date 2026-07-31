@@ -92,8 +92,7 @@ function compactThinkingRun(run: ThinkingBlock[]): ThinkingBlock[] {
 		}
 	}
 
-	// A streamed markdown title can briefly contain only its opening marker.
-	// Keep showing the previous completed summary instead of flashing the whole run.
+	// Avoid flashing the run while a streamed title contains only its opening marker.
 	if (entries.length > 1 && isPendingTitlePrefix(entries.at(-1)!.text)) entries.pop();
 	if (entries.length < 2) return run;
 	for (let index = 0; index < entries.length; index++) {
@@ -108,10 +107,7 @@ function compactThinkingRun(run: ThinkingBlock[]): ThinkingBlock[] {
 	return [{ ...latest.block, thinking: `×${entries.length} ${latest.text}` }];
 }
 
-/**
- * Return a presentation-only copy with title-like summary runs compacted.
- * The original message and its signed thinking blocks remain untouched.
- */
+/** Create a presentation-only copy without changing signed provider content. */
 export function compactThinkingSummaries(message: MessageLike): MessageLike {
 	if (message.role !== "assistant" || !Array.isArray(message.content)) return message;
 
@@ -164,9 +160,7 @@ function installAssistantUpdateController(
 			}
 
 			const result = stableState.originalUpdateContent.call(this, presentation);
-			// Pi uses lastMessage to rebuild on theme/visibility changes. Keep the real
-			// provider message there so every rebuild can recreate the compact view and
-			// signed thinking content is never replaced by the presentation clone.
+			// Preserve provider content because Pi rebuilds views from lastMessage.
 			if (presentation !== message) this.lastMessage = message;
 			return result;
 		};
@@ -233,8 +227,7 @@ export function installContainerController(
 		prototype[patchKey] = state;
 	}
 
-	// All three fields are replaced on every extension generation. The tiny permanent
-	// routing wrapper remains, but it retains no stale controller, dispatch or patch key.
+	// Update the permanent wrapper's generation state without retaining stale controllers.
 	state.controller = controller;
 	state.dispatch = renderContainerWithCompactThinking;
 	state.assistantPatchKey = assistantPatchKey;

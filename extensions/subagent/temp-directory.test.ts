@@ -22,8 +22,7 @@ describe("LazyTempDirectory", () => {
 	});
 
 	test("hands concurrent callers the same directory", async () => {
-		// Two callers that both found no directory would each make one, and only the last would be
-		// tracked — leaving the other in the temp dir for good.
+		// Concurrent callers must share one tracked directory.
 		const dir = tempDir();
 
 		const [first, second] = await Promise.all([dir.ensure(), dir.ensure()]);
@@ -34,14 +33,13 @@ describe("LazyTempDirectory", () => {
 	});
 
 	test("removes a directory whose creation landed after dispose", async () => {
-		// Shutdown can arrive while mkdtemp is still in flight, and the directory it returns would
-		// otherwise outlive the cleanup that was supposed to remove it.
+		// Dispose must remove a directory whose creation completes afterward.
 		const dir = tempDir();
 		const pending = dir.ensure();
 		dir.dispose();
 		const created = await pending;
 
-		// The removal is chained onto the same promise, so it runs on a later microtask.
+		// Cleanup is chained to creation and runs on a later microtask.
 		await Promise.resolve();
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -62,8 +60,7 @@ describe("LazyTempDirectory", () => {
 	});
 
 	test("retries after a failed creation instead of caching the rejection", async () => {
-		// A cached rejected promise would be handed to every later caller, so one transient EMFILE
-		// under a wide fan-out would disable spill files and sessions for the rest of the process.
+		// Failed creation must remain retryable instead of poisoning later callers.
 		const dir = tempDir();
 		const mkdtemp = vi.spyOn(fs.promises, "mkdtemp");
 		mkdtemp.mockRejectedValueOnce(Object.assign(new Error("EMFILE"), { code: "EMFILE" }));

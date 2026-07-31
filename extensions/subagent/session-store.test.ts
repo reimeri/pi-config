@@ -16,7 +16,7 @@ afterEach(() => {
 
 describe("SubagentSessionStore", () => {
 	test("returns the same session id for repeated use of one key", async () => {
-		// The whole point: run two resumes run one, so it must be handed the same session file.
+		// Concurrent resumes must share one session file.
 		const sessions = store();
 
 		const first = await sessions.resolve({ agent: "worker", cwd: "/repo", sessionKey: "auth" });
@@ -36,8 +36,7 @@ describe("SubagentSessionStore", () => {
 	});
 
 	test("does not count a resolved session whose run never starts", async () => {
-		// The session lock can refuse a run after it resolves; that must not inflate the run number
-		// the parent is shown for the run that actually goes ahead.
+		// Count only runs that acquire the session lock.
 		const sessions = store();
 		const scope = { agent: "worker", cwd: "/repo", sessionKey: "auth" };
 
@@ -48,8 +47,7 @@ describe("SubagentSessionStore", () => {
 	});
 
 	test("separates keys, agents, and working directories", async () => {
-		// A key reused across agents or checkouts must not resume a history someone else wrote, which
-		// the resuming agent would read as its own past work.
+		// Reusing a key across agents or checkouts must not resume another history.
 		const sessions = store();
 
 		const base = await sessions.resolve({ agent: "worker", cwd: "/repo", sessionKey: "auth" });
@@ -100,8 +98,7 @@ describe("findDuplicateSessionKey", () => {
 	});
 
 	test("catches an omitted cwd against one naming the default explicitly", () => {
-		// Both resolve to the same session at run time, so scoping the absent cwd to anything but the
-		// default would let the batch through and fail the second child once the first was running.
+		// Omitted and equivalent explicit cwd values must collide during duplicate detection.
 		expect(
 			findDuplicateSessionKey(
 				[

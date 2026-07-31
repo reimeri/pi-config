@@ -231,7 +231,7 @@ describe("reload-safe prototype adapter", () => {
 		expect(PatchedContainer.prototype.render).toBe(wrappedRender);
 		expect(instance.render(80)).toEqual(["second:read,bash"]);
 
-		// The previous extension generation shutting down must not disable the new one.
+		// An old generation must not disable the new generation.
 		detachContainerRenderController(firstState, first);
 		expect(instance.render(80)).toEqual(["second:read,bash"]);
 

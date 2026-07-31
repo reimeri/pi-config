@@ -22,11 +22,7 @@ export interface ToolModeCoordinatorSnapshot {
 	activeTools: string[];
 }
 
-// Recorded once per transition rather than restated every turn, so it stays in a
-// stable, cacheable position in the history. The active tool list is deliberately
-// omitted: every request already carries the authoritative set twice, as the tool
-// definitions and as the system prompt's tool list. What neither of those can say
-// is *why* a tool is missing, which is the only reason this message exists.
+// Record only the transition reason; tool definitions and the system prompt carry the active set.
 export function formatToolModeChange(state: Pick<ToolModeResult, "activeModeIds">): string {
 	const activeModes = state.activeModeIds.length > 0 ? state.activeModeIds.join(", ") : "none";
 	return `[TOOL MODE CHANGE]
@@ -83,8 +79,7 @@ export class ToolModeCoordinator {
 			try {
 				this.pi.setActiveTools(previousActiveTools);
 			} catch {
-				// Preserve the original transition error; restrictive modes retain
-				// their independent tool-call guards if runtime restoration also fails.
+				// Preserve the transition error; restrictive modes retain independent guards.
 			}
 			throw error;
 		}
@@ -172,7 +167,7 @@ export class ToolModeCoordinator {
 		toolNames: string[],
 	): Pick<ToolModeResult, "status" | "activeTools" | "unavailableTools"> {
 		const requestedTools = uniqueToolNames(toolNames);
-		// Use set for tools so tool order does not invalidate cache
+		// Use a set so tool order does not invalidate the cache.
 		if (!sameToolSet(requestedTools, this.pi.getActiveTools())) {
 			this.pi.setActiveTools(requestedTools);
 		}

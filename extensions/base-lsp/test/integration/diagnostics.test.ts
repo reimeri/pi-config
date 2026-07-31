@@ -179,15 +179,14 @@ describe("truthful diagnostics", () => {
       await service.checkPushBatch(client, [snapshot], Date.now() + 1_000, true, undefined, service.checkpoint(client));
       expect(await requestCount()).toBe(3);
 
-      // Reopening an untouched document is not an edit: the cache must survive an LRU cycle.
+      // An unchanged reopen is not an edit, so cache survives eviction.
       await client.documents!.close(path);
       const reopened = await client.documents!.sync(path);
       const cached = (await service.checkPushBatch(client, [reopened], Date.now() + 1_000, false, undefined, service.checkpoint(client))).get(reopened.uri)!;
       expect(cached).toMatchObject({ state: "diagnostics", confirmation: "typescript_tsserver_request" });
       expect(await requestCount()).toBe(3);
 
-      // Changing another file can change this one's diagnostics, so the cached answer is void even
-      // though this file's own content is untouched.
+      // Changes in another file can invalidate this file's diagnostics.
       await writeFile(dependency, "export const value = \"two\";\n");
       await client.documents!.sync(dependency);
       const rechecked = (await service.checkPushBatch(client, [reopened], Date.now() + 1_000, false, undefined, service.checkpoint(client))).get(reopened.uri)!;
@@ -318,8 +317,7 @@ describe("truthful diagnostics", () => {
       await client.start();
       client.capabilities!.diagnostics = { pull: false, workspace: false };
       service.observe(client);
-      // An earlier request (navigation, code actions, ...) opens the document and the server
-      // publishes for it. The next diagnostics call takes its checkpoint after that publication.
+      // Checkpoint after the earlier publication so the next call does not await it.
       await client.documents!.sync(path);
       await new Promise((resolve) => setTimeout(resolve, 150));
       const checkpoint = service.checkpoint(client);

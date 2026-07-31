@@ -51,8 +51,7 @@ describe("readJsonSse", () => {
 	});
 
 	test("receives a large single-line event in linear time", async () => {
-		// Accumulating fragments into one string and re-splitting it per chunk made this
-		// quadratic: ~3s for this input, against ~20ms when each chunk is scanned once.
+		// Per-chunk re-splitting is quadratic; scan each chunk once.
 		const payload = "x".repeat(8_000_000);
 		const bytes = new TextEncoder().encode(`data: ${JSON.stringify({ text: payload })}\n\n`);
 		const stream = new ReadableStream({

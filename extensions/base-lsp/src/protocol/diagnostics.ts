@@ -72,12 +72,7 @@ export class DiagnosticService {
     }
   }
 
-  /**
-   * Check a push-only group concurrently under one absolute deadline. The server may publish while
-   * the documents are being synchronized, so callers take the checkpoint before opening the batch;
-   * `check()` still inspects retained publications before registering its waiter. Per-file waits
-   * therefore overlap instead of multiplying the policy grace or silence timeout by file count.
-   */
+  /** Checks retained publications before concurrent per-file waits sharing one deadline. */
   async checkPushBatch(client: LspClient, snapshots: DocumentSnapshot[], deadlineAt: number, refresh: boolean, signal?: AbortSignal, checkpoint?: PushCheckpoint): Promise<Map<string, DiagnosticEvidence>> {
     throwIfAborted(signal);
     const direct = await this.checkTypeScriptBatch(client, snapshots, deadlineAt, refresh, signal);
@@ -97,13 +92,7 @@ export class DiagnosticService {
     return new Map(entries);
   }
 
-  /**
-   * typescript-language-server exposes a narrow read-only bridge to tsserver's synchronous
-   * syntactic, semantic, and suggestion diagnostic requests. Unlike its unversioned push stream,
-   * completion of all three requests is affirmative for the synchronized document and needs no
-   * temporal clean heuristic. Any unsupported or malformed response falls back to normal push
-   * evidence instead of being mistaken for clean.
-   */
+  /** tsserver's synchronous diagnostic requests affirm the snapshot; invalid responses fall back to push evidence. */
   private async checkTypeScriptBatch(client: LspClient, snapshots: DocumentSnapshot[], deadlineAt: number, refresh: boolean, signal?: AbortSignal): Promise<Map<string, DiagnosticEvidence | undefined> | undefined> {
     if (!isTypeScriptLanguageServer(client.server, client.serverInfo) || !client.capabilities?.executeCommands.includes(TS_SERVER_REQUEST_COMMAND)) return undefined;
     const state = this.ensure(client);
@@ -248,15 +237,7 @@ export class DiagnosticService {
   }
 
   private waitForPush(state: ClientDiagnosticState, snapshot: DocumentSnapshot, waitMs: number, signal: AbortSignal | undefined, settleMs: number, pushFirstMs: number, acceptUnversionedEmptyAfterOpen: boolean, checkpoint?: PushCheckpoint): Promise<DiagnosticEvidence> {
-    /**
-     * The checkpoint exists so that an unversioned publication cannot be mistaken for a causal
-     * response to the change we just synchronized. A publication carrying a version is not
-     * ambiguous in that way: document versions are unique per client and never reused for
-     * differing content, so a version equal to the snapshot's is itself proof that the server
-     * observed exactly this content. Requiring such a publication to also postdate the checkpoint
-     * would discard valid affirmative evidence and stall for the whole wait budget whenever the
-     * document was already opened and published by an earlier request.
-     */
+    // Unversioned publications must postdate the checkpoint; a unique matching version proves the snapshot.
     const versionConfirms = (params: BoundedPublishDiagnostics): boolean => params.version !== undefined && params.version === snapshot.version;
     const relevant = (params: BoundedPublishDiagnostics): boolean => checkpoint === undefined || params.sequence > checkpoint || versionConfirms(params);
     const provisionalEmpty = (params: BoundedPublishDiagnostics): boolean => params.version === undefined && params.diagnostics.length === 0;
@@ -326,13 +307,7 @@ export class DiagnosticService {
       for (const waiter of waiters.get(params.uri) ?? []) waiter(bounded);
     });
     const disposeRefresh = client.onDiagnosticRefresh(() => this.invalidate(client));
-    /**
-     * Confirmed evidence is keyed by a file's own content, but servers with inter-file dependencies
-     * derive a file's diagnostics from its imports too. Once any document reaches the server with
-     * new content, every cached result for this client may describe a workspace that no longer
-     * exists, so the whole confirmed cache goes. Retained publications and pull result ids survive:
-     * both carry their own version or result id and are validated against the snapshot on use.
-     */
+    // New content invalidates cross-file confirmations; snapshot-validated publications and pull IDs remain valid.
     const disposeChanges = client.onDocumentChanged(() => confirmed.clear());
     let disposed = false;
     let disposeStop: (() => void) | undefined;
@@ -345,8 +320,7 @@ export class DiagnosticService {
     } };
     this.clients.set(client, state);
     this.states.add(state);
-    // Subscribed last, once the state is fully built and registered: for a client that has already
-    // stopped this callback runs synchronously, and it must find a state it can actually release.
+    // Subscribe last: stopped clients invoke this synchronously, after state must be registered.
     disposeStop = client.onStop(() => state.dispose());
     return state;
   }

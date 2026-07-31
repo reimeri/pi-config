@@ -41,11 +41,7 @@ function renderFileDiff(file: StagedFile, path: string): string {
   return diff;
 }
 
-/**
- * A line plus whether it ends the text without a final newline. Presence of that newline is part of
- * the content an edit can change, so it participates in the comparison: otherwise an edit that only
- * adds or removes a trailing newline renders as a hunk with no changed lines at all.
- */
+/** A line and whether it ends without a newline; that flag participates in diffing. */
 interface DiffLine { text: string; endsWithoutNewline: boolean }
 function sameLine(left: DiffLine, right: DiffLine): boolean { return left.text === right.text && left.endsWithoutNewline === right.endsWithoutNewline; }
 function renderLine(marker: string, line: DiffLine): string { return `${marker}${line.text}\n${line.endsWithoutNewline ? "\\ No newline at end of file\n" : ""}`; }

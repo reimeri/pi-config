@@ -31,10 +31,7 @@ function isAssistantComponent(value: unknown): value is AssistantComponentLike {
 export default function compactThinkingExtension(pi: ExtensionAPI) {
 	let active = false;
 	let patchState: ContainerPatchState | undefined;
-	// Pi rebuilds the whole chat from session messages on /thinking, theme, output-pad and
-	// settings changes, on auto-compaction and on session switch, discarding every component
-	// without emitting an extension event. Hold them weakly and drop the discarded ones as
-	// new ones arrive, so a long session neither retains them nor re-renders them on shutdown.
+	// Pi rebuilds chat without extension events; weakly retain discarded components to avoid leaks and shutdown re-renders.
 	let tracked = new WeakSet<AssistantComponentLike>();
 	let components: Array<WeakRef<AssistantComponentLike>> = [];
 

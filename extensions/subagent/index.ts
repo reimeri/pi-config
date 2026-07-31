@@ -1,16 +1,3 @@
-/**
- * Subagent Tool - Delegate tasks to specialized agents
- *
- * Spawns a separate `pi` process for each subagent invocation,
- * giving it an isolated context window.
- *
- * Supports three modes:
- *   - Single: { agent: "name", task: "..." }
- *   - Parallel: { tasks: [{ agent: "name", task: "..." }, ...] }
- *   - Chain: { chain: [{ agent: "name", task: "... {previous} ..." }, ...] }
- *
- * Uses JSON mode to capture structured output from subagents.
- */
 
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -221,11 +208,7 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	return results;
 }
 
-/**
- * The files one child run is handed: its system prompt, and its task when that is too large to be a
- * command-line argument. One directory per run, created only when something needs it and removed
- * with its contents once the run is done with them.
- */
+/** Lazily creates one per-run directory for prompts/tasks and removes it after completion. */
 class ChildTempFiles {
 	private dir: string | null = null;
 
@@ -242,10 +225,7 @@ class ChildTempFiles {
 	remove(): void {
 		if (!this.dir) return;
 		try {
-			// Recursive and forcing, so residue cannot strand the directory: a write that failed after
-			// creating its file leaves one this run never learned the name of, and a file the child
-			// still holds open cannot be unlinked on Windows at all. Either would defeat a plain
-			// `rmdir`, and the leftovers hold the task text.
+			// Force recursive cleanup so failed or open files cannot strand task text.
 			fs.rmSync(this.dir, { recursive: true, force: true });
 		} catch {
 			/* ignore */
@@ -272,20 +252,7 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
-/**
- * Why a session key could not be taken, said in terms of what the parent should do next.
- *
- * `abandoned` is the case worth separating: the child from a previous run never exited and still has
- * the file open, so unlike an ordinary busy key this one is not going to free up and telling the
- * parent to wait would send it in circles for the rest of the conversation.
- */
-/**
- * Why a concurrency group could not be taken, said in terms of what the parent should do next.
- *
- * `abandoned` is per-run here rather than permanent, unlike a session's: the run that held the group
- * gave up on a child that never exited, so the group is not passed to whoever was queued behind it,
- * but a later run the parent decides to launch can still have it.
- */
+/** Explains a concurrency failure in terms of the parent's next action. */
 function groupBusyMessage(reason: GateFailure, group: string | undefined, agentName: string): string {
 	switch (reason) {
 		case "aborted":
@@ -338,9 +305,7 @@ async function runSingleAgent(
 	const tempFiles = new ChildTempFiles();
 	let releaseSession: (() => void) | undefined;
 	let heldSessionId: string | undefined;
-	// Set on the paths that stop waiting for a child that has not exited. Its session file is still
-	// open to it, so the lock on that session must not come back. Read in the `finally`, hence out
-	// here rather than beside the run it belongs to.
+	// Prevent a still-open session lock from being released in finally.
 	let childOutlivedRun = false;
 
 	const currentResult: SingleResult = {
@@ -369,8 +334,7 @@ async function runSingleAgent(
 
 	const queuedForGroup = concurrencyGate.isActive(agent.concurrencyGroup);
 	if (queuedForGroup) {
-		// The wait is silent otherwise, and a worker that has not started looks identical to one that
-		// started and has yet to say anything.
+		// Show waiting status; silence resembles a not-yet-started worker.
 		status = `(waiting for concurrency group "${agent.concurrencyGroup}"...)`;
 		emitUpdate();
 	}
@@ -388,13 +352,11 @@ async function runSingleAgent(
 			message: groupBusyMessage(concurrency.reason, agent.concurrencyGroup, agent.name),
 		});
 	}
-	// The waiting text is the last thing the parent was shown, and nothing else emits until the child
-	// speaks — which for an editing worker is a minute of spawn and first turn after the wait ended.
+	// Re-emit status after the wait so the parent sees progress before the child speaks.
 	if (queuedForGroup) emitUpdate();
 	const releaseConcurrency = concurrency.release;
 
-	// Session flags are decided below, once the store has answered; everything before that point is
-	// identical between runs of one session, which is what lets the provider cache the prefix.
+	// Resolve session flags after the shared invocation prefix for provider caching.
 	const args: string[] = ["--mode", "json", "-p", "--exclude-tools", "subagent"];
 	if (agent.model) args.push("--model", agent.model);
 	if (agent.thinking) args.push("--thinking", agent.thinking);
@@ -403,8 +365,7 @@ async function runSingleAgent(
 	try {
 		const session = sessionKey ? await sessions.resolve({ agent: agent.name, cwd: workingDir, sessionKey }) : undefined;
 		if (sessionKey && session) {
-			// Two children writing one session file would interleave their histories into something
-			// neither of them wrote.
+			// Serialize runs sharing a session file to prevent interleaved histories.
 			const queuedForSession = sessionGate.isActive(session.id);
 			if (queuedForSession) {
 				status = `(waiting for subagent session "${sessionKey}"...)`;
@@ -430,10 +391,7 @@ async function runSingleAgent(
 			currentResult.session = { key: sessionKey, run: session.begin() };
 		} else {
 			args.push("--no-session");
-			// A key that could not be given a session leaves the child with none, and the parent asked
-			// for continuity precisely because its task text assumes it — a delta that names work the
-			// child is supposed to already remember. Recording the key without a run number makes the
-			// result say so rather than let the parent read a confused reply as the agent's judgement.
+			// Preserve the requested key without claiming a run when session setup failed.
 			if (sessionKey) currentResult.session = { key: sessionKey };
 		}
 
@@ -442,8 +400,7 @@ async function runSingleAgent(
 			args.push("--append-system-prompt", await tempFiles.write(`prompt-${safeName}.md`, agent.systemPrompt));
 		}
 
-		// Taken after the concurrency gate is held and released only in the `finally` below, so no
-		// second run of the same group can move the tree between these two observations.
+		// Capture after acquiring the group so another run cannot modify the tree between snapshots.
 		let workspaceBefore: WorkspaceSnapshot | undefined;
 		let workspaceCaptureFailure: string | undefined;
 		if (agent.captureDiff) {
@@ -452,8 +409,7 @@ async function runSingleAgent(
 			else workspaceCaptureFailure = captured.reason;
 		}
 
-		// Last, so a task large enough to need a file is written only once the run is certain to
-		// start — after the gates, and after the workspace snapshot that a failure here would strand.
+		// Write oversized task files only after failure-prone setup succeeds.
 		const delivery = planTaskDelivery(task);
 		if (delivery.kind === "file") args.push(`@${await tempFiles.write(delivery.fileName, delivery.contents)}`);
 		args.push(delivery.argument);
@@ -498,9 +454,7 @@ async function runSingleAgent(
 					emitUpdate();
 				}
 
-				// `tool_result_end` carries the child's tool output, which no renderer reads and which
-				// was the bulk of what every run persisted. The assistant message that requested the
-				// tool is kept, so the call and its arguments still appear.
+				// Persist assistant tool calls but omit tool output, which no renderer reads.
 			};
 
 			const stdoutLines = new LineStream(processLine);
@@ -523,9 +477,7 @@ async function runSingleAgent(
 				cleanup();
 				resolve(code);
 			};
-			// Stop waiting for a "close" that is not coming. Hanging here would keep
-			// the whole tool call pending for the rest of the session, and the
-			// agent's concurrency group with it.
+			// Stop waiting when close will not arrive, or the tool call and group remain blocked.
 			const abandonAfter = (delayMs: number) => {
 				if (settled || abandonTimer) return;
 				abandonTimer = setTimeout(() => {
@@ -549,9 +501,7 @@ async function runSingleAgent(
 			proc.on("close", (code) => finish(code ?? 0));
 			proc.on("error", (error) => {
 				currentResult.stderr += `${currentResult.stderr ? "\n" : ""}${error.message}`;
-				// A child that spawned still owes a "close" carrying its real exit code,
-				// so an error must not settle the run on its own. It does mean something
-				// went wrong with the handle, so bound the wait for that close.
+				// A spawned child still owes close; bound the wait instead of settling immediately.
 				if (shouldFinishOnChildError(spawned)) finish(1);
 				else abandonAfter(CHILD_TERMINATION_GRACE_MS);
 			});
@@ -573,43 +523,26 @@ async function runSingleAgent(
 		});
 
 		currentResult.exitCode = exitCode;
-		// Carried into the result because it changes what the messages mean: they stop at the moment
-		// the run gave up reading, not at the moment the child stopped working.
+		// Messages end when reading stopped, not necessarily when the child stopped.
 		if (childOutlivedRun) currentResult.childOutlivedRun = true;
-		// Deliberately not passed the abort signal: an aborted worker is exactly the case where the
-		// parent most needs to know which files were left changed.
+		// Capture workspace state even after abort so edits are reported.
 		if (agent.captureDiff) {
 			currentResult.workspace = await buildWorkspaceReport(workingDir, workspaceBefore, workspaceCaptureFailure);
 		}
 		if (wasAborted) {
-			// Returning the run rather than throwing it away is the whole point: an aborted worker
-			// may already have edited files, and the messages collected so far are the only record
-			// of which ones. A throw here also took every finished sibling in a parallel batch down
-			// with it. `isFailedResult` keeps this an error; a signalled child reports exit code 0.
+			// Return partial aborted results so edits and sibling results are not lost.
 			currentResult.stopReason = "aborted";
 			currentResult.errorMessage ??= "Subagent was aborted before it finished.";
 		}
 		return currentResult;
 	} finally {
-		// Deliberately not released when the child outlived the run: it still has the session file
-		// open, and a second pi appending to the same file would interleave two histories into one
-		// neither of them wrote. Holding the key costs the parent a session; releasing it costs the
-		// transcript. Abandoning rather than simply not releasing is what stops the next run from
-		// queuing for minutes on a key nobody is coming back to. The concurrency group is released
-		// either way, as it always was — waiting on a process that may never exit would block the
-		// agent for the rest of the conversation — but it is not handed to whoever is queued behind
-		// it: that child is still alive and may still be editing, and the queue would put a second
-		// worker in the same tree without anyone having read why the first one was given up on.
+		// Keep the session locked; drop current group waiters before release so the parent sees this failure.
 		if (childOutlivedRun) {
 			sessionGate.abandon(heldSessionId);
 			concurrencyGate.dropWaiters(agent.concurrencyGroup);
 		} else releaseSession?.();
 		releaseConcurrency();
-		// Both files are read by the child while it starts, so a child that exited is done with them.
-		// One that outlived the run may not have got there yet, and its task arrives as an `@file`,
-		// which pi exits on when it is missing rather than degrading the way an absent
-		// `--append-system-prompt` path does. Deleting them would kill the child this path exists to
-		// let keep working, so they are left for the OS to reap.
+		// Retain files for an outlived child; it may not have read its @file arguments yet.
 		if (!childOutlivedRun) tempFiles.remove();
 	}
 }
@@ -651,20 +584,13 @@ const SubagentParams = Type.Object({
 
 export default function (pi: ExtensionAPI) {
 	const concurrencyGate = new AgentConcurrencyGate();
-	// Keyed by session id rather than by agent, so unrelated sessions of the same agent stay free to
-	// run while one of them is busy.
+	// Key by session ID so unrelated sessions of one agent remain independent.
 	const sessionGate = new AgentConcurrencyGate();
 	const sessions = new SubagentSessionStore();
-	// Caps what reaches the parent's context in every mode. Parallel fans out and was capped from the
-	// start, but a single worker report or chain step lands in the same context window and had none.
+	// Apply the parent-context cap to single, parallel, and chain results.
 	const overflow = new OutputOverflowStore();
 
-	/**
-	 * What one run contributes to the parent's context: the agent's own report, capped, followed by
-	 * what the tool observed of the workspace. The observation is appended after the cap so it can
-	 * never be the part that gets truncated away — it is small, and it is the part the agent did not
-	 * write itself.
-	 */
+	/** Caps agent output while retaining workspace/session metadata after the cap. */
 	const reportForParent = async (result: SingleResult): Promise<string> => {
 		const capped = await overflow.capForParent(result.agent, getResultOutput(result));
 		const trailer = [formatWorkspaceReport(result.workspace), formatSessionNote(result, formatTokens)].filter(Boolean);
@@ -676,15 +602,7 @@ export default function (pi: ExtensionAPI) {
 		sessions.dispose();
 	});
 
-	// Read once, here, rather than per call. A tool description is part of the request prefix, so
-	// rebuilding it from a fresh discovery on every invocation would rewrite the parent's cached
-	// prefix whenever an agent file was touched mid-conversation — paying for the whole context to be
-	// re-sent to describe agents the model is not currently choosing between. The cost is that a newly
-	// added agent is callable immediately but unlisted until the next start or `/reload`; discovery
-	// itself still runs per call, so nothing else goes stale.
-	//
-	// User scope only: project agents are opt-in per call and gated on a trust prompt, so advertising
-	// them from whatever directory Pi happened to start in would be wrong on both counts.
+	// Cache the user catalog for prefix stability; discover project and extension agents per call.
 	const catalog = (() => {
 		try {
 			return formatAgentCatalog(discoverAgents(process.cwd(), "user").agents);
@@ -711,8 +629,7 @@ export default function (pi: ExtensionAPI) {
 		].join(" "),
 		promptSnippet: "Delegate isolated codebase exploration, independent code review, and broader web research to specialized subagents",
 		promptGuidelines: [
-			// Deliberately does not name agents. Naming them here made the system prompt a second,
-			// silently diverging copy of the installed set; the tool description carries the real list.
+			// Keep the installed-agent list in the tool description rather than duplicating it here.
 			"Use subagent for work that would consume substantial main-agent context — broad codebase exploration, an independent review after meaningful changes, or research that benefits from source evaluation; the tool description lists the installed agents and what each is for.",
 			"Every subagent invocation starts with fresh context and does not automatically receive the parent conversation or prior subagent calls; pass needed context explicitly in the task (chain mode may use {previous}) and never assume agent memory.",
 			"Give subagent focused, self-contained tasks with the relevant requirements, paths, symbols, constraints, and acceptance criteria; do not delegate trivial lookups, and verify consequential findings before editing.",
@@ -806,14 +723,11 @@ export default function (pi: ExtensionAPI) {
 
 				for (let i = 0; i < params.chain.length; i++) {
 					const step = params.chain[i];
-					// Replacer function, not a replacement string: `$&`, `$'`, "$`", and `$1`
-					// occurring in a prior agent's output must be inserted literally.
+					// Use a replacer so replacement tokens in prior output remain literal.
 					const taskWithContext = step.task.replace(/\{previous\}/g, () => previousOutput);
 
-					// Create update callback that includes all previous results
 					const chainUpdate: OnUpdateCallback | undefined = onUpdate
 						? (partial) => {
-								// Combine completed results with current streaming result
 								const currentResult = partial.details?.results[0];
 								if (currentResult) {
 									const allResults = [...results, currentResult];
@@ -904,17 +818,10 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-				// A group already held by another tool call no longer rejects the batch. The one task
-				// that needs it queues for it, which is what the parent asked for, while its read-only
-				// siblings — the reason the batch was parallel — run immediately instead of being
-				// thrown away over a conflict none of them had. The waiting task does occupy one of
-				// the MAX_CONCURRENCY slots while it queues, but `findParallelConcurrencyConflict`
-				// above caps that at one task per group, so it cannot stall the batch.
+				// Queue only the conflicting task; independent siblings run immediately.
 
-				// Track all results for streaming updates
 				const allResults: SingleResult[] = new Array(params.tasks.length);
 
-				// Initialize placeholder results
 				for (let i = 0; i < params.tasks.length; i++) {
 					allResults[i] = {
 						agent: params.tasks[i].agent,
@@ -940,8 +847,7 @@ export default function (pi: ExtensionAPI) {
 					}
 				};
 
-				// One task's failure must not discard its siblings' finished work, so each is contained
-				// here rather than allowed to reject the whole batch.
+				// Contain each task failure so completed siblings remain available.
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
 					const result = await runSafely(t.agent, t.task, undefined, () =>
 						runSingleAgent(
@@ -952,14 +858,10 @@ export default function (pi: ExtensionAPI) {
 							t.cwd,
 							undefined,
 							signal,
-							// Per-task update callback
 							(partial) => {
 								const inProgress = partial.details?.results[0];
 								if (inProgress) {
-									// A partial carries the run's initial exit code of 0, which is the sentinel
-									// for a finished, successful task. Keeping the placeholder's -1 is what makes
-									// a task still running — or, since the gate learned to queue, one that has
-									// not started at all — count and render as running rather than as done.
+									// Preserve -1 so queued and running tasks render as unfinished.
 									allResults[index] = { ...inProgress, exitCode: -1 };
 									emitParallelUpdate();
 								}
@@ -1047,7 +949,6 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("muted", ` [${scope}]`);
 				for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
 					const step = args.chain[i];
-					// Clean up {previous} placeholder for display
 					const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
 					const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
 					text +=
@@ -1237,7 +1138,6 @@ export default function (pi: ExtensionAPI) {
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
 
-						// Show tool calls
 						for (const item of displayItems) {
 							if (item.type === "toolCall") {
 								container.addChild(
@@ -1250,7 +1150,6 @@ export default function (pi: ExtensionAPI) {
 							}
 						}
 
-						// Show final output as markdown
 						if (finalOutput) {
 							container.addChild(new Spacer(1));
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
@@ -1269,7 +1168,6 @@ export default function (pi: ExtensionAPI) {
 					return container;
 				}
 
-				// Collapsed view
 				let text =
 					icon +
 					" " +
@@ -1324,7 +1222,6 @@ export default function (pi: ExtensionAPI) {
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
 
-						// Show tool calls
 						for (const item of displayItems) {
 							if (item.type === "toolCall") {
 								container.addChild(
@@ -1337,7 +1234,6 @@ export default function (pi: ExtensionAPI) {
 							}
 						}
 
-						// Show final output as markdown
 						if (finalOutput) {
 							container.addChild(new Spacer(1));
 							container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
@@ -1356,7 +1252,6 @@ export default function (pi: ExtensionAPI) {
 					return container;
 				}
 
-				// Collapsed view (or still running)
 				let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 				for (const r of details.results) {
 					const rIcon =

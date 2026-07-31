@@ -142,9 +142,7 @@ export function persistedToolModeBaseline(ctx: ExtensionContext): string[] | und
 	if (persistedState) return persistedState.baselineTools;
 
 	const branch = ctx.sessionManager.getBranch();
-	// Migrate branches written before the shared coordinator existed. The first
-	// mode enabled in the latest overlapping mode cycle captured the true
-	// unconstrained baseline; later mode snapshots may already be restricted.
+	// Recover the unconstrained baseline from the first mode in legacy overlapping cycles.
 	let planEnabled = false;
 	let quarantineEnabled = false;
 	let cycleBaseline: string[] | undefined;
@@ -196,8 +194,7 @@ export function locallyActiveToolModeReports(
 			},
 		});
 	} catch {
-		// Coordinator reconciliation remains the primary source; local reporting
-		// is defense in depth for emergency fail-closed mode state.
+		// Coordinator state is primary; local reporting preserves emergency fail-closed behavior.
 	}
 	return [...reports.values()];
 }

@@ -39,9 +39,7 @@ describe("positions", () => {
     expect(offsetsToServerRange(mixed, 0, mixed.length, "utf-16")).toEqual({ start: { line: 0, character: 0 }, end: { line: 4, character: 5 } });
     expect(offsetsToServerRange(mixed, 7, 11, "utf-16")).toEqual({ start: { line: 1, character: 0 }, end: { line: 1, character: 4 } });
 
-    // Converting many positions against one document must not rescan it every time. Without a
-    // memoized line table this is O(document) per call and costs seconds on a large file. Assert
-    // the memo structurally rather than on wall-clock time, which flakes on a loaded machine.
+    // Verify structural memoization rather than machine-dependent elapsed time.
     const large = "const someIdentifier = someValue + otherValue; // filler\n".repeat(30_000);
     const before = lineTableStats().builds;
     for (let index = 0; index < 400; index += 1) serverToPublicPosition(large, { line: index * 70, character: 6 }, "utf-16");
@@ -50,8 +48,7 @@ describe("positions", () => {
   });
 
   it("charges the line-table memo for line offsets, not just text length", () => {
-    // A file of many short lines costs far more in offsets than in characters; a budget that
-    // counted only text length would understate what the cache retains by several times.
+    // Short-line documents consume more table storage than text length suggests.
     const shortLines = "ab\n".repeat(20_000);
     const before = lineTableStats();
     serverToPublicPosition(shortLines, { line: 0, character: 0 }, "utf-16");
@@ -75,8 +72,7 @@ describe("boundary, roots and routing", () => {
 
 describe("push diagnostic chunk scheduling", () => {
   it("keeps a default-sized sweep in one chunk while reserving eviction headroom", () => {
-    // The batching win depends on a default sweep opening every file at once: if this ever splits
-    // into chunks, clean-settling waits start multiplying by chunk count again.
+    // Keep the default sweep in one chunk so settling is not multiplied by chunk count.
     expect(pushChunkSize(DEFAULT_LIMITS.maxOpenDocuments)).toBeGreaterThanOrEqual(DEFAULT_LIMITS.maxFiles);
     expect(pushChunkSize(DEFAULT_LIMITS.maxOpenDocuments)).toBeLessThan(DEFAULT_LIMITS.maxOpenDocuments);
     expect(pushChunkSize(1)).toBe(1);

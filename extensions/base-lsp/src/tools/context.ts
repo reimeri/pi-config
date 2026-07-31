@@ -13,12 +13,7 @@ import type { DocumentSnapshot } from "../runtime/document-store.js";
 export interface SessionRuntime { cwd: string; boundary: string; loaded: LoadedConfig; registry: ServerRegistry; roots: RootDetector; manager: ClientManager; diagnostics: DiagnosticService; changed: Set<string>; previewActions: Set<string>; previewRenames: Set<string> }
 export type RuntimeGetter = () => SessionRuntime;
 
-/**
- * Preview tokens are consumed by a successful apply, so a long session accumulates only the
- * previews that were never applied. Retaining the most recent ones bounds that set while keeping
- * the realistic preview-then-apply sequence working; an evicted token simply requires a fresh
- * preview, which is the same answer the tool already gives for one it has never seen.
- */
+// Retain recent unapplied previews; eviction requires a fresh preview and bounds long-session memory.
 const MAX_PREVIEW_TOKENS = 200;
 export function rememberPreview(tokens: Set<string>, id: string): void {
   tokens.delete(id);

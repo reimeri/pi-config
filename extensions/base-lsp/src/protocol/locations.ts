@@ -5,11 +5,7 @@ import { serverToPublicPosition } from "./positions.js";
 import { isContained, uriToFilePath } from "../workspace/boundary.js";
 
 export interface PublicLocationRange { start: { line: number; character?: number }; end: { line: number; character?: number } }
-/**
- * Why a public column could not be derived: either the target's text was not safely readable, or
- * the server's range does not fit the text we can see, which normally means its index is stale.
- * Either way the raw server range is preserved instead of inventing a column.
- */
+/** Why public columns are unavailable; preserves the raw range instead of inventing coordinates. */
 export type UnresolvedRangeReason = "text-unavailable" | "out-of-range";
 export interface NormalizedLocation {
   uri: string;
@@ -37,11 +33,9 @@ export async function normalizeLocations(value: unknown, root: string, boundary:
     if (isLocationLink(item)) entries.push({ uri: item.targetUri, range: item.targetRange, link: item });
     else if (isLocation(item)) entries.push({ uri: item.uri, range: item.range });
   }
-  // Entries the server sent that we could not interpret are dropped; report how many so a caller
-  // never has to infer silent loss from a `total` that exceeds the locations it received.
+  // Report unconvertible entries so callers can distinguish loss from truncation.
   const rejected = selected.length - entries.length;
-  // Group by target so the bounded text memo below reads each file once even when the server
-  // interleaves files. The final ordering is imposed by the sort at the end regardless.
+  // Group by target to read each file once; final sorting determines output order.
   entries.sort((a, b) => a.uri.localeCompare(b.uri));
   const result: NormalizedLocation[] = [];
   const texts = new BoundedTextCache();
@@ -50,10 +44,7 @@ export async function normalizeLocations(value: unknown, root: string, boundary:
     const localTarget = file ? await resolveLocalTarget(file, boundary) : undefined;
     const local = Boolean(localTarget);
     const targetText = localTarget ? await texts.get(localTarget) : undefined;
-    // A server may report a range that does not fit the text on disk, typically because its index
-    // predates an external edit. That is one bad location, not a reason to fail the whole result.
-    // Each range is resolved independently: one that does not fit must not suppress a sibling that
-    // does, and whatever fails keeps its raw server range rather than vanishing.
+    // A stale range invalidates only itself; preserve its raw value and convert siblings.
     const target = resolvePart(targetText, range, encoding);
     const selection = resolvePart(targetText, link?.targetSelectionRange, encoding);
     const origin = resolvePart(originText, link?.originSelectionRange, encoding);
@@ -96,12 +87,7 @@ export function tryConvertRange(text: string, range: Range, encoding: PositionEn
   try { return convertRange(text, range, encoding); } catch { return undefined; }
 }
 
-/**
- * Per-call memo of target file contents. A references result routinely points at the same file
- * many times, and each location previously reread and rescanned that file from disk. Bounded so a
- * result spanning many large files cannot retain them all at once, and least-recently-used so a
- * file revisited after the window has moved on is not evicted ahead of colder entries.
- */
+/** Per-call bounded LRU of target contents; repeated references often share files. */
 class BoundedTextCache {
   private readonly entries = new Map<string, string | undefined>();
   private chars = 0;

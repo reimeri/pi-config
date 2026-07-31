@@ -112,17 +112,7 @@ function getLine(text: string, index: number): LineInfo {
 /** Half-open bounds of every line, excluding its newline sequence. */
 interface LineTable { starts: number[]; ends: number[] }
 
-/**
- * Content-addressed memo of line tables. Callers convert many positions against the same document
- * text — one per symbol, per edit, or per diagnostic — and rebuilding the table each time made
- * conversion O(document) instead of O(1). Keying on the text itself keeps the memo correct by
- * construction: differing content can never share a table.
- *
- * The budget is charged in estimated bytes, not characters: a file of many short lines costs far
- * more in line offsets than in text, so counting only `text.length` would understate what the
- * cache retains by several times. Entries are capped too, since many small documents cost mostly
- * per-entry overhead that no size estimate captures.
- */
+/** Content-keyed line-table cache; charges estimated table bytes and caps entry overhead. */
 interface CacheEntry { table: LineTable; cost: number }
 const tableCache = new Map<string, CacheEntry>();
 let cachedCost = 0;

@@ -91,9 +91,7 @@ function cloneBounded(input: unknown, limits: CloneLimits): { value: BaseDetails
     if (Array.isArray(value)) {
       if (seen.has(value)) { truncated = true; return "[omitted: circular value]"; }
       if (value.length > limits.maxArray) truncated = true;
-      // Only the path from the root is marked, so a value reachable twice is cloned twice rather
-      // than reported as a cycle. Details routinely share references (one snapshot cited by several
-      // locations), and calling that circular would omit data the caller does have.
+      // Track only the current path: clone shared references instead of mislabeling them as cycles.
       seen.add(value);
       const output = value.slice(0, limits.maxArray).map((item) => visit(item, depth + 1));
       seen.delete(value);

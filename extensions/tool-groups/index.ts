@@ -209,9 +209,7 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 			if (!Number.isFinite(width) || width <= 0) return [];
 			const theme = activeTheme?.();
 			if (!theme) return undefined;
-			// An expanded group puts its header a screenful or more above the viewport, so
-			// every status change inside it rewrites a line Pi cannot reach with a
-			// differential update, costing a full clear-and-repaint of the transcript.
+			// Avoid differential updates when expanded headers may be off-screen.
 			if (tools.some((tool) => tool.expanded === true)) return undefined;
 			return renderCollapsedGroup(tools, Math.floor(width), theme);
 		},

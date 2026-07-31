@@ -30,18 +30,9 @@ export class DocumentStore {
   private readonly registryMutex = new AsyncMutex();
   private readonly pins = new Map<string, number>();
   private readonly pinWaiters = new Set<() => void>();
-  /**
-   * Highest version ever assigned per path, retained across close/reopen. Versions must never be
-   * reused for a document whose content differs, because consumers such as the diagnostic service
-   * treat a matching (uri, version) pair as proof that a server publication describes this exact
-   * snapshot. Restarting at version 1 after an LRU close would break that invariant.
-   */
+  /** Highest version per path; retained so versions never identify different content. */
   private readonly versionFloor = new Map<string, number>();
-  /**
-   * Content last handed to the server per path, retained across close/reopen so that reopening an
-   * untouched document is not mistaken for an edit. Consumers that cache cross-file results need to
-   * know when the server's view of the workspace actually changed, which an LRU reopen does not.
-   */
+  /** Last synchronized content; retained so an unchanged reopen does not invalidate caches. */
   private readonly syncedHashes = new Map<string, string>();
   constructor(private readonly server: ServerDefinition, private readonly capabilities: NormalizedCapabilities, private readonly notify: Notify, private readonly maxOpen: number, private readonly maxFileBytes: number, private readonly onContentChanged: (path: string) => void = () => undefined) {}
 
@@ -105,8 +96,7 @@ export class DocumentStore {
     if (!info.isFile()) throw new Error(`Not a regular file: ${path}`);
     if (info.size > this.maxFileBytes) throw new Error(`File exceeds synchronization limit (${this.maxFileBytes} bytes): ${path}`);
     const existing = this.documents.get(path);
-    // A diagnostics sweep re-synchronizes every open document, and almost all of them are untouched
-    // since the last one. Recognising that from the stat alone skips reading and hashing the file.
+    // Skip reads and hashing when stat metadata proves the document is unchanged.
     if (existing && this.isUnchangedOnDisk(existing, info)) { existing.lastUse = Date.now(); return { ...existing, syncState: "unchanged" }; }
     const readAtMs = Date.now();
     const text = await readFile(path, "utf8");
@@ -140,28 +130,13 @@ export class DocumentStore {
     return { ...existing, syncState: "changed" };
   }
   /**
-   * Whether `document` still matches the file `info` describes, without reading it back.
-   *
-   * Size and modification time alone would not be enough. Same-length edits are ordinary here — an
-   * agent flipping a digit or a boolean leaves the byte count untouched — so a write landing in the
-   * same clock tick as the time already recorded would be invisible, and the server would keep
-   * answering from content that no longer exists on disk. Requiring the recorded time to be
-   * strictly older than the moment its read began closes that window: it establishes that the
-   * modification behind the cached text completed before the read, so any write after the read must
-   * carry a later time and will be noticed. Git applies the same rule to its index and calls the
-   * entries this excludes racily clean.
-   *
-   * A file whose timestamp sits in the future, or one whose mtime is not updated on write at all,
-   * simply never takes this path and is re-read as before.
+   * Size/mtime can miss same-size writes within one clock tick. Trust metadata only when mtime
+   * predates the read; future or unchanged timestamps fall back to rereading.
    */
   private isUnchangedOnDisk(document: OpenDocument, info: Stats): boolean {
     return info.size === document.size && info.mtimeMs === document.mtimeMs && info.mtimeMs < document.readAtMs;
   }
-  /**
-   * Announce content the server has not seen before. A first sync is not announced: the server has
-   * no prior view of that path to invalidate, and treating every cold open as an edit would discard
-   * cached cross-file results on each LRU reopen during a sweep.
-   */
+  /** Notify only for previously seen content; a cold open is not an edit. */
   private recordSynced(path: string, hash: string): void {
     const previous = this.syncedHashes.get(path);
     this.syncedHashes.set(path, hash);

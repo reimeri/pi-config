@@ -20,8 +20,7 @@ describe("formatTodoReminder", () => {
 	test("carries every item so the canonical list can be passed back to todo_update", () => {
 		const reminder = formatTodoReminder(mixed);
 
-		// Completed items included: todo_update replaces the list atomically, so
-		// omitting them invites the model to silently drop them from the next call.
+		// Include completed items because todo_update replaces the list atomically.
 		expect(reminder).toContain("[x] a: Extract the reminder builder");
 		expect(reminder).toContain("[>] b: Gate the redundant injections");
 		expect(reminder).toContain("[ ] c: Cover the gating with tests");
@@ -36,7 +35,7 @@ describe("formatTodoReminder", () => {
 	});
 
 	test("renders the list exactly as the todo_update result does", () => {
-		// One rendering, so the reminder and the tool result cannot drift apart.
+		// Use one rendering so reminder and tool result cannot diverge.
 		expect(formatTodoReminder(mixed)).toContain(formatTodosForAgent(mixed));
 	});
 
@@ -62,8 +61,7 @@ describe("shouldRemindTodos", () => {
 	});
 
 	test("stays silent once every item is completed", () => {
-		// The guidelines ask for the finished list to stay visible, so without this
-		// the reminder would bill on every call for the rest of the session.
+		// Keep completed items visible without rebilling the reminder every call.
 		const done = mixed.map((todo) => ({ ...todo, status: "completed" as const }));
 
 		expect(shouldRemindTodos(done, [assistant])).toBe(false);
