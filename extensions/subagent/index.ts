@@ -28,7 +28,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.ts";
+import { type AgentConfig, type AgentScope, discoverAgents, formatAgentCatalog } from "./agents.ts";
 import {
 	AgentConcurrencyGate,
 	findChainConcurrencyConflicts,
@@ -676,11 +676,30 @@ export default function (pi: ExtensionAPI) {
 		sessions.dispose();
 	});
 
+	// Read once, here, rather than per call. A tool description is part of the request prefix, so
+	// rebuilding it from a fresh discovery on every invocation would rewrite the parent's cached
+	// prefix whenever an agent file was touched mid-conversation — paying for the whole context to be
+	// re-sent to describe agents the model is not currently choosing between. The cost is that a newly
+	// added agent is callable immediately but unlisted until the next start or `/reload`; discovery
+	// itself still runs per call, so nothing else goes stale.
+	//
+	// User scope only: project agents are opt-in per call and gated on a trust prompt, so advertising
+	// them from whatever directory Pi happened to start in would be wrong on both counts.
+	const catalog = (() => {
+		try {
+			return formatAgentCatalog(discoverAgents(process.cwd(), "user").agents);
+		} catch {
+			return "The installed agents could not be listed; call subagent with any agent name to see them.";
+		}
+	})();
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate substantial codebase exploration to the scout agent, independent code review to the reviewer agent, and broader web research to the researcher agent.",
+			"Delegate a self-contained task to a specialized agent running in its own isolated context.",
+			catalog,
+			"An active mode may contribute further agents while it is enabled; those are described by the mode itself.",
 			"Every child starts with fresh isolated context and does not automatically receive the parent conversation or context from prior subagent invocations; share context explicitly in the task, including with chain mode's {previous} placeholder.",
 			"The exception is sessionKey: repeating it sends a follow-up task to the same child, which still cannot see the parent conversation but does keep everything from its own earlier runs.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder). Agents that mutate the workspace cannot run in chain mode; give each one its own single call so you can inspect its result before delegating the next task.",
@@ -692,9 +711,9 @@ export default function (pi: ExtensionAPI) {
 		].join(" "),
 		promptSnippet: "Delegate isolated codebase exploration, independent code review, and broader web research to specialized subagents",
 		promptGuidelines: [
-			"Use subagent with the scout agent for broad codebase exploration that would consume substantial main-agent context.",
-			"Use subagent with the reviewer agent for an independent review after meaningful code changes.",
-			"Use subagent with the researcher agent for broader web research that benefits from source evaluation and evidence-backed synthesis.",
+			// Deliberately does not name agents. Naming them here made the system prompt a second,
+			// silently diverging copy of the installed set; the tool description carries the real list.
+			"Use subagent for work that would consume substantial main-agent context — broad codebase exploration, an independent review after meaningful changes, or research that benefits from source evaluation; the tool description lists the installed agents and what each is for.",
 			"Every subagent invocation starts with fresh context and does not automatically receive the parent conversation or prior subagent calls; pass needed context explicitly in the task (chain mode may use {previous}) and never assume agent memory.",
 			"Give subagent focused, self-contained tasks with the relevant requirements, paths, symbols, constraints, and acceptance criteria; do not delegate trivial lookups, and verify consequential findings before editing.",
 			"For follow-up tasks, include a concise handoff of the prior findings, affected locations, failure scenarios, and expected resolution; quote prior output when exact details matter rather than referring to 'your previous review'.",

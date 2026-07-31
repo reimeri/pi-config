@@ -24,6 +24,21 @@ Supervisor mode conditionally contributes a `worker` implementation agent. It is
 
 The reviewer prompt restricts `bash` to read-only Git commands. This is an instruction, not an OS-level sandbox.
 
+### How the model learns which agents exist
+
+The tool description names every installed user agent and carries each one's own `description:` line in full, so the list the model chooses from is the list on disk. It used to name `scout`, `reviewer`, and `researcher` outright, which made the description a claim about a particular configuration: a renamed agent left the model calling something that no longer existed, and a fourth agent was uncallable unless the model guessed it was there.
+
+Neither the number of agents nor the length of a description is capped. A cap would recreate exactly that failure for whatever fell past it, and since discovery does not sort, the cut would land by directory order — which agents the model could see would depend on the filesystem.
+
+The list is built **once, when the extension loads**, not per call. A tool description is part of the request prefix, so rebuilding it from a fresh discovery on every invocation would rewrite the parent's cached prefix whenever an agent file was touched mid-conversation — re-sending the whole context to describe agents the model is not choosing between. The trade-off is that a newly added agent is callable immediately but unlisted until the next start or `/reload`. Everything else still reads agent files per call, so models and prompts stay live.
+
+Two kinds of agent are deliberately absent from that list:
+
+- **project agents**, which are opt-in per call via `agentScope` and gated on a trust prompt — advertising them from whatever directory Pi started in would be wrong on both counts;
+- **mode-contributed agents** such as the supervisor's `worker`, which exist only while their mode is active. The description says a mode may add agents; the mode's own instructions describe them.
+
+Calling an agent that does not exist returns the agents in scope for that call, which is the escape hatch for a mode's agents. It is not one for project agents: the scope defaults to `user`, so they are listed only once `agentScope` is already set. The tool description names that parameter instead.
+
 ## Configure an agent
 
 Edit its Markdown frontmatter, for example:

@@ -13,9 +13,9 @@ The editor top bar shows `◆ supervisor` while the mode is active.
 
 The main agent acts as the senior planner and integrator:
 
-1. Investigate directly or use `scout`; use `researcher` when senior technical or external research is useful.
+1. Investigate directly, or delegate substantial exploration and senior technical or external research to the installed agents the subagent tool description lists for that work.
 2. Resolve ambiguity and select the architecture, interfaces, invariants, and sequencing.
-3. For high-risk cross-cutting work, ask `reviewer` to critique the implementation specification.
+3. For high-risk cross-cutting work, ask a review agent to critique the implementation specification.
 4. Break implementation into TODO items that each represent one leaf worker package.
 5. Invoke one worker with one package, inspect its diff, and verify its acceptance criteria before assigning the next package.
 6. Review the integrated result and delegate narrow follow-up fixes when needed.

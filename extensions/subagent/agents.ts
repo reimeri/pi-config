@@ -179,12 +179,32 @@ export function discoverAgents(
 	return { agents: Array.from(agentMap.values()), projectAgentsDir };
 }
 
-export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {
-	if (agents.length === 0) return { text: "none", remaining: 0 };
-	const listed = agents.slice(0, maxItems);
-	const remaining = agents.length - listed.length;
-	return {
-		text: listed.map((a) => `${a.name} (${a.source}): ${a.description}`).join("; "),
-		remaining,
-	};
+/**
+ * The installed agents, as one line for the tool description.
+ *
+ * The description used to name scout, reviewer, and researcher outright, which made it a claim about
+ * the user's configuration rather than a description of the tool: an agent added, renamed, or
+ * removed left the model choosing from a list that no longer existed, and any agent beyond those
+ * three was invisible unless the model guessed its name.
+ *
+ * Every agent is named, and its description is carried in full. Capping the count or the length
+ * would recreate that same failure for whatever fell past the cut, and the cut would land by
+ * directory order, since discovery does not sort — so which agents the model could see would depend
+ * on the filesystem. The list is built once per start, so its size is paid for in the prefix once
+ * rather than per call.
+ *
+ * Only the name and its own description are included. Model, thinking level, and tools are how an
+ * agent is built rather than what it is for, and the caller is choosing between agents.
+ */
+export function formatAgentCatalog(agents: readonly AgentConfig[]): string {
+	if (agents.length === 0) return "No agents are currently installed.";
+
+	const listed = agents.map((agent) => {
+		// Descriptions are free-form frontmatter, and a multi-line one would otherwise break up a
+		// description that is assembled as a single line.
+		const summary = agent.description.replace(/\s+/g, " ").trim();
+		return summary ? `${agent.name} — ${summary}` : agent.name;
+	});
+
+	return `Available agents: ${listed.join("; ")}.`;
 }

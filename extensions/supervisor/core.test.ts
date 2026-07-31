@@ -59,7 +59,10 @@ describe("supervisorInstructions", () => {
 		expect(prompt).toContain("Never launch more than one worker concurrently");
 		expect(prompt).toContain("Pass sessionKey when the next leaf continues work");
 		expect(prompt).toContain("Omit sessionKey for unrelated leaves");
-		expect(prompt).toContain("use reviewer to critique the implementation specification");
+		// Named no agent but worker, which the mode itself contributes. Naming the installed ones here
+		// made the prompt a second copy of the agents dir that diverged the moment one was renamed.
+		expect(prompt).toContain("have a review agent critique the implementation specification");
+		expect(prompt).not.toMatch(/\b(scout|reviewer|researcher)\b/);
 		expect(prompt).toContain("Worker verifies its assigned leaf with targeted checks");
 		expect(prompt).toContain("supervisor independently inspects or confirms");
 		expect(prompt).toContain("Bash remains available");
