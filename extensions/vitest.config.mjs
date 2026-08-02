@@ -23,11 +23,21 @@ function findPiEntry() {
   }
 }
 
+function findPiDependency(piEntry, packageName) {
+  return createRequire(piEntry).resolve(packageName);
+}
+
+const piEntry = findPiEntry();
+
 // Use .mjs because Pi scans top-level .ts/.js files as extensions.
 export default defineConfig({
   resolve: {
     // Use the host-provided packages used by bare extensions at runtime.
-    alias: { "@earendil-works/pi-coding-agent": findPiEntry() },
+    alias: {
+      "@earendil-works/pi-coding-agent": piEntry,
+      "@earendil-works/pi-tui": findPiDependency(piEntry, "@earendil-works/pi-tui"),
+      typebox: findPiDependency(piEntry, "typebox"),
+    },
   },
   test: {
     // Run base-lsp separately because it has its own dependencies and config.

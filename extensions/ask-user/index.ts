@@ -2,6 +2,7 @@ import type { ToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { withPiDashAttention } from "./attention.ts";
 import {
 	answerSummary,
 	runAskUserFlow,
@@ -141,11 +142,11 @@ export default function askUserExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const details = await runAskUserFlow(
-				questions,
-				createAskUserUI(ctx.ui, ctx.mode === "tui"),
-				signal,
-				{ allowBackNavigation: ctx.mode === "tui" },
+			const ui = createAskUserUI(ctx.ui, ctx.mode === "tui");
+			const details = await withPiDashAttention(pi.events, () =>
+				runAskUserFlow(questions, ui, signal, {
+					allowBackNavigation: ctx.mode === "tui",
+				}),
 			);
 			if (details.status === "answered") {
 				return {
