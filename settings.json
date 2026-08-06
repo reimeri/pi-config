@@ -9,5 +9,6 @@
     "enabled": false
   },
   "hideThinkingBlock": false,
-  "showCacheMissNotices": true
+  "showCacheMissNotices": true,
+  "tuiMode": "regular"
 }

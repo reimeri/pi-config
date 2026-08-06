@@ -209,6 +209,7 @@ function renderCollapsedGroup(
 }
 
 const TOOL_ACTIONS = ["open", "close", "toggle"] as const;
+const TOOL_SUBCOMMANDS = [...TOOL_ACTIONS, "close-all"] as const;
 type ToolAction = typeof TOOL_ACTIONS[number];
 
 function isToolAction(value: string): value is ToolAction {
@@ -219,9 +220,12 @@ function toolArgumentCompletions(prefix: string, addressBook: ToolAddressBook) {
 	const actionMatch = /^(\S*)$/.exec(prefix);
 	if (actionMatch) {
 		const actionPrefix = actionMatch[1]!.toLowerCase();
-		return TOOL_ACTIONS
+		return TOOL_SUBCOMMANDS
 			.filter((action) => action.startsWith(actionPrefix))
-			.map((action) => ({ value: `${action} `, label: action }));
+			.map((action) => ({
+				value: action === "close-all" ? action : `${action} `,
+				label: action,
+			}));
 	}
 
 	const idMatch = /^(\S+)\s+(\S*)$/.exec(prefix);
@@ -268,20 +272,27 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("tool", {
-		description: "Open, close, or toggle one numbered tool call",
+		description: "Open, close, or toggle numbered tool calls",
 		getArgumentCompletions(prefix) {
 			return toolArgumentCompletions(prefix, addressBook);
 		},
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/);
 			const action = parts[0]?.toLowerCase() ?? "";
+			if (action === "close-all" && parts.length === 1) {
+				ctx.ui.setToolsExpanded(false);
+				for (const { tool } of addressBook.entries()) tool.setExpanded?.(false);
+				ctx.ui.notify("All tool output closed", "info");
+				return;
+			}
+
 			const idText = parts[1] ?? "";
 			if (
 				parts.length !== 2
 				|| !isToolAction(action)
 				|| !/^[1-9]\d*$/.test(idText)
 			) {
-				ctx.ui.notify("Usage: /tool open|close|toggle <id>", "error");
+				ctx.ui.notify("Usage: /tool close-all or /tool open|close|toggle <id>", "error");
 				return;
 			}
 			if (mode === "off") {

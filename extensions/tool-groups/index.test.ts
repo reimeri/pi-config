@@ -167,6 +167,7 @@ describe("tool-groups extension", () => {
 				{ value: "open ", label: "open" },
 				{ value: "close ", label: "close" },
 				{ value: "toggle ", label: "toggle" },
+				{ value: "close-all", label: "close-all" },
 			]);
 			expect(first.toolCommand.getArgumentCompletions("open ")).toEqual([
 				{ value: "open 1", label: "1", description: "Read /tmp/a.ts" },
@@ -182,6 +183,17 @@ describe("tool-groups extension", () => {
 			await first.toolCommand.handler("close 2", ctx);
 			expect(bashTool.expanded).toBe(false);
 			expect(root.render(100).join("\n")).toContain("[2] Bash printf ok");
+
+			await first.toolCommand.handler("open 1", ctx);
+			await first.toolCommand.handler("open 2", ctx);
+			ctx.ui.setToolsExpanded(true);
+			await first.toolCommand.handler("close-all", ctx);
+			expect(readTool.expanded).toBe(false);
+			expect(bashTool.expanded).toBe(false);
+			expect(ctx.ui.getToolsExpanded()).toBe(false);
+			expect(root.render(100).join("\n")).toContain("Tools × 2");
+			expect(notices.at(-1)).toBe("All tool output closed");
+
 			await first.toolCommand.handler("toggle 1", ctx);
 			expect(readTool.expanded).toBe(true);
 			await first.toolCommand.handler("toggle 1", ctx);
@@ -190,7 +202,9 @@ describe("tool-groups extension", () => {
 			await first.toolCommand.handler("open 999", ctx);
 			expect(notices.at(-1)).toBe("Unknown tool ID: 999");
 			await first.toolCommand.handler("open nope", ctx);
-			expect(notices.at(-1)).toBe("Usage: /tool open|close|toggle <id>");
+			expect(notices.at(-1)).toBe(
+				"Usage: /tool close-all or /tool open|close|toggle <id>",
+			);
 
 			const groupedSubagents = subagentRoot.render(100).join("\n");
 			expect(groupedSubagents).toContain("Subagent (scout) Explore");
@@ -244,6 +258,14 @@ describe("tool-groups extension", () => {
 
 			await second.command.handler("toggle", ctx);
 			expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
+			readTool.expanded = true;
+			bashTool.expanded = true;
+			ctx.ui.setToolsExpanded(true);
+			await second.toolCommand.handler("close-all", ctx);
+			expect(readTool.expanded).toBe(false);
+			expect(bashTool.expanded).toBe(false);
+			expect(ctx.ui.getToolsExpanded()).toBe(false);
+			expect(notices.at(-1)).toBe("All tool output closed");
 
 			await second.command.handler("toggle", ctx);
 			expect(root.render(100).join("\n")).toContain("Tools × 2");
