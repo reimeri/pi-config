@@ -6,6 +6,7 @@ import {
 	installContainerRenderController,
 	renderContainerWithGroups,
 	summarizeToolArgs,
+	ToolAddressBook,
 	toolStatus,
 	type ContainerLike,
 	type GroupRenderController,
@@ -63,6 +64,31 @@ function controller(
 		renderGroup: (tools) => [`${prefix}:${tools.map((item) => item.toolName).join(",")}`],
 	};
 }
+
+describe("ToolAddressBook", () => {
+	test("assigns transcript-order IDs, refreshes component references, and resets numbering", () => {
+		const addressBook = new ToolAddressBook();
+		const read = tool("read");
+		const bash = tool("bash");
+
+		expect(addressBook.register(read)).toBe(1);
+		expect(addressBook.register(bash)).toBe(2);
+		expect(addressBook.register(read)).toBe(1);
+		expect(addressBook.entries()).toEqual([
+			{ id: 1, tool: read },
+			{ id: 2, tool: bash },
+		]);
+
+		const rebuiltRead = tool("read");
+		expect(addressBook.register(rebuiltRead)).toBe(1);
+		expect(addressBook.getId(rebuiltRead)).toBe(1);
+		expect(addressBook.getTool(1)).toBe(rebuiltRead);
+
+		addressBook.clear();
+		expect(addressBook.entries()).toEqual([]);
+		expect(addressBook.register(bash)).toBe(1);
+	});
+});
 
 describe("buildGroupPlans", () => {
 	test("groups adjacent tools across any number of invisible separators", () => {

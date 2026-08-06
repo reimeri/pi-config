@@ -19,6 +19,7 @@ import {
 	sanitizeSummary,
 	summarizeToolArgs,
 	toolStatus,
+	ToolAddressBook,
 	type ContainerRenderPatchState,
 	type GroupRenderController,
 	type ToolLike,
@@ -172,7 +173,14 @@ function formatHeader(tools: ToolLike[], width: number, theme: Theme): string {
 	);
 }
 
-function formatCompactTool(tool: ToolLike, index: number, total: number, width: number, theme: Theme): string {
+function formatCompactTool(
+	tool: ToolLike,
+	id: number,
+	index: number,
+	total: number,
+	width: number,
+	theme: Theme,
+): string {
 	const branch = index === total - 1 ? "└" : "├";
 	const label = humanizeToolName(tool.toolName);
 	const summary = sanitizeSummary(summarizeToolArgs(tool));
@@ -180,22 +188,62 @@ function formatCompactTool(tool: ToolLike, index: number, total: number, width: 
 		? `${theme.fg("toolTitle", label)} ${theme.fg("dim", summary)}`
 		: theme.fg("toolTitle", label);
 	return truncateToWidth(
-		` ${theme.fg("dim", branch)} ${statusDot(toolStatus(tool), theme)} ${body}`,
+		` ${theme.fg("dim", branch)} ${statusDot(toolStatus(tool), theme)} ${theme.fg("muted", `[${id}]`)} ${body}`,
 		Math.max(1, width),
 		"",
 	);
 }
 
-function renderCollapsedGroup(tools: ToolLike[], width: number, theme: Theme): string[] {
+function renderCollapsedGroup(
+	tools: ToolLike[],
+	width: number,
+	theme: Theme,
+	addressBook: ToolAddressBook,
+): string[] {
 	return [
 		"",
 		formatHeader(tools, width, theme),
-		...tools.map((tool, index) => formatCompactTool(tool, index, tools.length, width, theme)),
+		...tools.map((tool, index) =>
+			formatCompactTool(tool, addressBook.register(tool), index, tools.length, width, theme)),
 	];
+}
+
+const TOOL_ACTIONS = ["open", "close", "toggle"] as const;
+type ToolAction = typeof TOOL_ACTIONS[number];
+
+function isToolAction(value: string): value is ToolAction {
+	return TOOL_ACTIONS.includes(value as ToolAction);
+}
+
+function toolArgumentCompletions(prefix: string, addressBook: ToolAddressBook) {
+	const actionMatch = /^(\S*)$/.exec(prefix);
+	if (actionMatch) {
+		const actionPrefix = actionMatch[1]!.toLowerCase();
+		return TOOL_ACTIONS
+			.filter((action) => action.startsWith(actionPrefix))
+			.map((action) => ({ value: `${action} `, label: action }));
+	}
+
+	const idMatch = /^(\S+)\s+(\S*)$/.exec(prefix);
+	if (!idMatch) return [];
+	const action = idMatch[1]!.toLowerCase();
+	if (!isToolAction(action)) return [];
+	const idPrefix = idMatch[2]!;
+	return addressBook.entries()
+		.filter(({ id }) => String(id).startsWith(idPrefix))
+		.map(({ id, tool }) => {
+			const summary = summarizeToolArgs(tool);
+			return {
+				value: `${action} ${id}`,
+				label: String(id),
+				description: `${humanizeToolName(tool.toolName)}${summary ? ` ${summary}` : ""}`,
+			};
+		});
 }
 
 export default function toolGroupsExtension(pi: ExtensionAPI) {
 	let mode = loadConfig().config.mode;
+	const addressBook = new ToolAddressBook();
 	let active = false;
 	let activeTheme: (() => Theme) | undefined;
 	let patchState: ContainerRenderPatchState | undefined;
@@ -203,7 +251,11 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 	const controller: GroupRenderController = {
 		isEnabled: () => active && mode !== "off" && activeTheme !== undefined,
 		minimumGroupSize: () => mode === "all" ? 1 : 2,
-		isTool: isToolComponent,
+		isTool(value): value is ToolLike {
+			if (!isToolComponent(value)) return false;
+			addressBook.register(value);
+			return true;
+		},
 		isIgnorableSeparator,
 		renderGroup(tools, width) {
 			if (!Number.isFinite(width) || width <= 0) return [];
@@ -211,9 +263,48 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 			if (!theme) return undefined;
 			// Avoid differential updates when expanded headers may be off-screen.
 			if (tools.some((tool) => tool.expanded === true)) return undefined;
-			return renderCollapsedGroup(tools, Math.floor(width), theme);
+			return renderCollapsedGroup(tools, Math.floor(width), theme, addressBook);
 		},
 	};
+
+	pi.registerCommand("tool", {
+		description: "Open, close, or toggle one numbered tool call",
+		getArgumentCompletions(prefix) {
+			return toolArgumentCompletions(prefix, addressBook);
+		},
+		handler: async (args, ctx) => {
+			const parts = args.trim().split(/\s+/);
+			const action = parts[0]?.toLowerCase() ?? "";
+			const idText = parts[1] ?? "";
+			if (
+				parts.length !== 2
+				|| !isToolAction(action)
+				|| !/^[1-9]\d*$/.test(idText)
+			) {
+				ctx.ui.notify("Usage: /tool open|close|toggle <id>", "error");
+				return;
+			}
+			if (mode === "off") {
+				ctx.ui.notify("Tool grouping is off; enable it with /tool-groups consecutive or all", "error");
+				return;
+			}
+
+			const id = Number(idText);
+			const tool = Number.isSafeInteger(id) ? addressBook.getTool(id) : undefined;
+			if (!tool || !tool.setExpanded) {
+				ctx.ui.notify(`Unknown tool ID: ${idText}`, "error");
+				return;
+			}
+
+			const expanded = action === "open"
+				? true
+				: action === "close"
+					? false
+					: tool.expanded !== true;
+			tool.setExpanded(expanded);
+			ctx.ui.notify(`Tool ${id} ${expanded ? "opened" : "closed"}`, "info");
+		},
+	});
 
 	pi.registerCommand("tool-groups", {
 		description: "Set tool grouping to consecutive, all (including singles), or off",
@@ -258,6 +349,7 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		const loaded = loadConfig();
 		mode = loaded.config.mode;
+		addressBook.clear();
 		if (ctx.mode !== "tui") return;
 
 		active = true;
@@ -270,9 +362,18 @@ export default function toolGroupsExtension(pi: ExtensionAPI) {
 		if (loaded.warning) ctx.ui.notify(loaded.warning, "warning");
 	});
 
+	pi.on("session_tree", () => {
+		addressBook.clear();
+	});
+
+	pi.on("session_compact", () => {
+		addressBook.clear();
+	});
+
 	pi.on("session_shutdown", () => {
 		active = false;
 		activeTheme = undefined;
+		addressBook.clear();
 		if (patchState) detachContainerRenderController(patchState, controller);
 		patchState = undefined;
 	});

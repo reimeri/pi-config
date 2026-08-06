@@ -19,6 +19,45 @@ export interface ToolLike extends RenderableComponent {
 	callRendererComponent?: unknown;
 }
 
+export interface AddressedTool {
+	id: number;
+	tool: ToolLike;
+}
+
+export class ToolAddressBook {
+	private readonly idByToolCallId = new Map<string, number>();
+	private readonly toolById = new Map<number, ToolLike>();
+	private nextId = 1;
+
+	register(tool: ToolLike): number {
+		let id = this.idByToolCallId.get(tool.toolCallId);
+		if (id === undefined) {
+			id = this.nextId++;
+			this.idByToolCallId.set(tool.toolCallId, id);
+		}
+		this.toolById.set(id, tool);
+		return id;
+	}
+
+	getId(tool: ToolLike): number | undefined {
+		return this.idByToolCallId.get(tool.toolCallId);
+	}
+
+	getTool(id: number): ToolLike | undefined {
+		return this.toolById.get(id);
+	}
+
+	entries(): AddressedTool[] {
+		return Array.from(this.toolById, ([id, tool]) => ({ id, tool }));
+	}
+
+	clear(): void {
+		this.idByToolCallId.clear();
+		this.toolById.clear();
+		this.nextId = 1;
+	}
+}
+
 export type OriginalContainerRender = (this: ContainerLike, width: number) => string[];
 
 export interface GroupRenderController {

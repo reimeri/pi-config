@@ -39,10 +39,12 @@ const { initTheme } = await import(pathToFileURL(themeEntry).href);
 initTheme("dark", false);
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 
+let fakeToolSequence = 0;
+
 function fakeTool(name: string, args: Record<string, unknown>) {
 	return {
 		toolName: name,
-		toolCallId: `id-${name}`,
+		toolCallId: `id-${++fakeToolSequence}`,
 		args,
 		expanded: false,
 		isPartial: false,
@@ -111,13 +113,19 @@ describe("tool-groups extension", () => {
 			const extension = loaded.extensions[0];
 			expect(extension).toBeDefined();
 			const start = extension?.handlers.get("session_start")?.[0];
+			const tree = extension?.handlers.get("session_tree")?.[0];
+			const compact = extension?.handlers.get("session_compact")?.[0];
 			const shutdown = extension?.handlers.get("session_shutdown")?.[0];
 			const command = extension?.commands.get("tool-groups");
+			const toolCommand = extension?.commands.get("tool");
 			expect(typeof start).toBe("function");
+			expect(typeof tree).toBe("function");
+			expect(typeof compact).toBe("function");
 			expect(typeof shutdown).toBe("function");
 			expect(command).toBeDefined();
+			expect(toolCommand).toBeDefined();
 			if (shutdown) shutdowns.push(shutdown);
-			return { start, shutdown, command };
+			return { start, tree, compact, shutdown, command, toolCommand };
 		};
 
 		const root = new Container();
@@ -151,9 +159,39 @@ describe("tool-groups extension", () => {
 			await first.start?.({}, ctx);
 			const grouped = root.render(100).join("\n");
 			expect(grouped).toContain("Tools × 2");
-			expect(grouped).toContain("Read /tmp/a.ts");
-			expect(grouped).toContain("Bash printf ok");
+			expect(grouped).toContain("[1] Read /tmp/a.ts");
+			expect(grouped).toContain("[2] Bash printf ok");
 			expect(grouped).not.toContain("FULL:read");
+
+			expect(first.toolCommand.getArgumentCompletions("")).toEqual([
+				{ value: "open ", label: "open" },
+				{ value: "close ", label: "close" },
+				{ value: "toggle ", label: "toggle" },
+			]);
+			expect(first.toolCommand.getArgumentCompletions("open ")).toEqual([
+				{ value: "open 1", label: "1", description: "Read /tmp/a.ts" },
+				{ value: "open 2", label: "2", description: "Bash printf ok" },
+			]);
+
+			await first.toolCommand.handler("open 2", ctx);
+			expect(readTool.expanded).toBe(false);
+			expect(bashTool.expanded).toBe(true);
+			expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
+			expect(notices.at(-1)).toBe("Tool 2 opened");
+
+			await first.toolCommand.handler("close 2", ctx);
+			expect(bashTool.expanded).toBe(false);
+			expect(root.render(100).join("\n")).toContain("[2] Bash printf ok");
+			await first.toolCommand.handler("toggle 1", ctx);
+			expect(readTool.expanded).toBe(true);
+			await first.toolCommand.handler("toggle 1", ctx);
+			expect(readTool.expanded).toBe(false);
+			expect(notices.at(-1)).toBe("Tool 1 closed");
+			await first.toolCommand.handler("open 999", ctx);
+			expect(notices.at(-1)).toBe("Unknown tool ID: 999");
+			await first.toolCommand.handler("open nope", ctx);
+			expect(notices.at(-1)).toBe("Usage: /tool open|close|toggle <id>");
+
 			const groupedSubagents = subagentRoot.render(100).join("\n");
 			expect(groupedSubagents).toContain("Subagent (scout) Explore");
 			expect(groupedSubagents).toContain("Subagent (2 scouts, reviewer)");
@@ -184,7 +222,19 @@ describe("tool-groups extension", () => {
 			await first.shutdown?.({ reason: "reload" }, ctx);
 			const second = await loadGeneration();
 			await second.start?.({ reason: "reload" }, ctx);
+			const reloadedGroup = root.render(100).join("\n");
+			expect(reloadedGroup).toContain("[1] Read /tmp/a.ts");
+			expect(reloadedGroup).toContain("[2] Bash printf ok");
 			expect(singleRoot.render(100).join("\n")).toContain("Read × 1");
+
+			await second.compact?.({}, ctx);
+			const compactedRoot = new Container();
+			compactedRoot.addChild(bashTool as any);
+			expect(compactedRoot.render(100).join("\n")).toContain("[1] Bash printf ok");
+			expect(second.toolCommand.getArgumentCompletions("open ")).toEqual([
+				{ value: "open 1", label: "1", description: "Bash printf ok" },
+			]);
+
 			await second.command.handler("status", ctx);
 			expect(notices.at(-1)).toBe("Tool grouping: all");
 
@@ -200,6 +250,11 @@ describe("tool-groups extension", () => {
 			expect(singleRoot.render(100)).toEqual(["FULL:read"]);
 			expect(notices.at(-1)).toBe("Tool grouping: consecutive");
 
+			await second.tree?.({}, ctx);
+			const renumberedGroup = root.render(100).join("\n");
+			expect(renumberedGroup).toContain("[1] Read /tmp/a.ts");
+			expect(renumberedGroup).toContain("[2] Bash printf ok");
+
 			await second.shutdown?.({ reason: "reload" }, ctx);
 			writeFileSync(
 				join(agentDir, "tool-groups.json"),
@@ -208,6 +263,10 @@ describe("tool-groups extension", () => {
 			const third = await loadGeneration();
 			await third.start?.({ reason: "reload" }, ctx);
 			expect(root.render(100)).toEqual(["FULL:read", "", "FULL:bash"]);
+			await third.toolCommand.handler("open 1", ctx);
+			expect(notices.at(-1)).toBe(
+				"Tool grouping is off; enable it with /tool-groups consecutive or all",
+			);
 			expect(JSON.parse(readFileSync(join(agentDir, "tool-groups.json"), "utf8"))).toEqual({
 				version: 2,
 				mode: "off",
