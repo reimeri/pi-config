@@ -56,8 +56,8 @@ function coordinatorWithTools(toolNames: string[]): {
 	};
 }
 
-const planMode: ToolModeDefinition = {
-	id: "plan",
+const restrictedMode: ToolModeDefinition = {
+	id: "restricted",
 	priority: 10,
 	apply: (toolNames) => toolNames.filter((name) => !["edit", "write", "todo_update"].includes(name)),
 };
@@ -69,15 +69,15 @@ const quarantineMode: ToolModeDefinition = {
 };
 
 describe("ToolModeCoordinator", () => {
-	test("restores the full baseline after plan mode is disabled", () => {
+	test("restores the full baseline after a mode is disabled", () => {
 		const baseline = ["read", "bash", "edit", "write", "todo_update"];
 		const { coordinator, tools } = coordinatorWithTools(baseline);
 
-		const enabled = coordinator.setMode(planMode, true);
-		expect(enabled.activeModeIds).toEqual(["plan"]);
+		const enabled = coordinator.setMode(restrictedMode, true);
+		expect(enabled.activeModeIds).toEqual(["restricted"]);
 		expect(tools.getActiveTools()).toEqual(["read", "bash"]);
 
-		const disabled = coordinator.setMode(planMode, false);
+		const disabled = coordinator.setMode(restrictedMode, false);
 		expect(disabled.activeModeIds).toEqual([]);
 		expect(disabled.baselineTools).toEqual(baseline);
 		expect(tools.getActiveTools()).toEqual(baseline);
@@ -103,7 +103,7 @@ describe("ToolModeCoordinator", () => {
 		const baseline = ["read", "bash", "edit", "write", "todo_update"];
 		const { coordinator, tools } = coordinatorWithTools(baseline);
 
-		coordinator.setMode(planMode, true);
+		coordinator.setMode(restrictedMode, true);
 		const afterEnable = tools.applyCount;
 		expect(afterEnable).toBe(1);
 
@@ -129,11 +129,11 @@ describe("ToolModeCoordinator", () => {
 		const baseline = ["read", "bash", "edit", "write", "todo_update"];
 		const { coordinator, tools } = coordinatorWithTools(baseline);
 
-		coordinator.setMode(planMode, true);
+		coordinator.setMode(restrictedMode, true);
 		coordinator.setMode(quarantineMode, true);
-		const planDisabled = coordinator.setMode(planMode, false);
+		const restrictedDisabled = coordinator.setMode(restrictedMode, false);
 
-		expect(planDisabled.activeModeIds).toEqual(["quarantine"]);
+		expect(restrictedDisabled.activeModeIds).toEqual(["quarantine"]);
 		expect(tools.getActiveTools()).toEqual(["read", "grep", "find", "ls"]);
 
 		const quarantineDisabled = coordinator.setMode(quarantineMode, false);
@@ -183,7 +183,7 @@ describe("tool-mode extension context integration", () => {
 		expect(context).toBeDefined();
 
 		await startSession(handlers);
-		await setToolMode(pi.events, planMode, true);
+		await setToolMode(pi.events, restrictedMode, true);
 
 		tools.setActiveTools([...tools.getActiveTools(), "write"]);
 		const messages = [{ role: "assistant", content: [{ type: "text", text: "hi" }] }];
@@ -198,7 +198,7 @@ describe("tool-mode extension context integration", () => {
 		const quarantineTools = ["read", "grep", "find", "ls"];
 		const { pi, tools, events, handlers } = setupToolModeExtension(baseline);
 		await startSession(handlers);
-		await setToolMode(pi.events, planMode, true);
+		await setToolMode(pi.events, restrictedMode, true);
 
 		tools.setActiveTools(quarantineTools);
 		events.on("tool-modes:local-status", (data) => {
@@ -220,18 +220,43 @@ describe("tool-mode change announcements", () => {
 		expect(sent).toHaveLength(0);
 	});
 
+	test("announces when a persisted mode no longer has an active policy", async () => {
+		const { handlers, sent } = setupToolModeExtension(["read", "bash", "edit"]);
+		const sessionStart = handlers.get("session_start")?.[0];
+		await sessionStart?.({}, {
+			sessionManager: {
+				getBranch: () => [
+					{
+						type: "custom",
+						customType: "tool-mode-coordinator-state",
+						data: {
+							version: 1,
+							baselineTools: ["read", "bash", "edit"],
+							activeModeIds: ["removed"],
+						},
+					},
+				],
+			},
+		});
+
+		await startSession(handlers);
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0].content).toContain("Active restrictive modes: none");
+	});
+
 	test("announces a transition once, not on every turn", async () => {
 		const baseline = ["read", "bash", "edit", "write", "todo_update"];
 		const { pi, handlers, sent } = setupToolModeExtension(baseline);
 		const turnEnd = handlers.get("turn_end")?.[0];
 		await startSession(handlers);
 
-		await setToolMode(pi.events, planMode, true);
+		await setToolMode(pi.events, restrictedMode, true);
 		await turnEnd?.({});
 		expect(sent).toHaveLength(1);
 		expect(sent[0].customType).toBe("tool-mode-change");
 		expect(sent[0].display).toBe(false);
-		expect(sent[0].content).toContain("Active restrictive modes: plan");
+		expect(sent[0].content).toContain("Active restrictive modes: restricted");
 
 		await turnEnd?.({});
 		await startSession(handlers);
@@ -244,9 +269,9 @@ describe("tool-mode change announcements", () => {
 		const turnEnd = handlers.get("turn_end")?.[0];
 		await startSession(handlers);
 
-		await setToolMode(pi.events, planMode, true);
+		await setToolMode(pi.events, restrictedMode, true);
 		await turnEnd?.({});
-		await setToolMode(pi.events, planMode, false);
+		await setToolMode(pi.events, restrictedMode, false);
 		await turnEnd?.({});
 
 		expect(sent).toHaveLength(2);
@@ -278,9 +303,9 @@ describe("formatToolModeChange", () => {
 	});
 
 	test("reports composed restrictions", () => {
-		const status = formatToolModeChange({ activeModeIds: ["plan", "quarantine"] });
+		const status = formatToolModeChange({ activeModeIds: ["restricted", "quarantine"] });
 
-		expect(status).toContain("Active restrictive modes: plan, quarantine");
+		expect(status).toContain("Active restrictive modes: restricted, quarantine");
 	});
 
 	test("omits the tool list the request already carries twice", () => {

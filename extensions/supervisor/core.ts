@@ -39,7 +39,7 @@ Other operating rules:
 - Worker verifies its assigned leaf with targeted checks. The supervisor independently inspects or confirms those results and may run read-only tests, builds, diagnostics, and inspections itself.
 - Bash remains available for information gathering and verification. Do not use bash to create, rewrite, move, or delete files; perform scripted source edits; install dependencies; or run mutating Git commands.
 - Do not attempt direct edits through indirect tools. The absence of common edit tools is guidance, not a security boundary.
-- Honor stricter active modes. In plan mode, do not delegate implementation to worker. If another mode removes subagent, explain that delegation is unavailable.
+- Honor stricter active modes. If another mode removes subagent, explain that delegation is unavailable.
 - Keep delegation efficient: do trivial read-only lookups yourself, batch independent investigations when useful, and avoid sending multiple agents to rediscover the same context.
 
 The supervisor-provided worker agent exists only while this mode is active.`;

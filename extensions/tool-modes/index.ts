@@ -1,10 +1,11 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatToolModeChange, ToolModeCoordinator } from "./coordinator.ts";
 import {
 	TOOL_MODE_REQUEST_EVENT,
 	TOOL_MODE_STATE_ENTRY_TYPE,
 	TOOL_MODE_STATE_VERSION,
 	locallyActiveToolModeReports,
+	persistedToolModeState,
 	type ToolModeCoordinatorState,
 	type ToolModeRequest,
 	type ToolModeResult,
@@ -21,19 +22,11 @@ function isOptionalToolNameArray(value: unknown): boolean {
 	);
 }
 
-function isValidBaselinePatch(value: unknown): boolean {
-	if (value === undefined) return true;
-	if (!value || typeof value !== "object") return false;
-	const patch = value as Record<string, unknown>;
-	return isOptionalToolNameArray(patch.add) && isOptionalToolNameArray(patch.remove);
-}
-
 function isValidSetOptions(value: unknown): boolean {
 	if (value === undefined) return true;
 	if (!value || typeof value !== "object") return false;
 	const options = value as Record<string, unknown>;
 	return (
-		isValidBaselinePatch(options.baselinePatch) &&
 		isOptionalToolNameArray(options.baselineSeed) &&
 		(options.persist === undefined || typeof options.persist === "boolean")
 	);
@@ -49,7 +42,6 @@ function isToolModeRequest(value: unknown): value is ToolModeRequest {
 	) {
 		return false;
 	}
-	if (request.action === "reconcile") return true;
 	if (
 		request.action !== "set" ||
 		typeof request.enabled !== "boolean" ||
@@ -87,6 +79,18 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 			display: false,
 		});
 	}
+
+	function restoreAnnouncementBaseline(ctx: ExtensionContext): void {
+		const state = persistedToolModeState(ctx);
+		announcedModeIds = state ? [...state.activeModeIds].sort().join(",") : undefined;
+	}
+
+	pi.on("session_start", (_event, ctx) => {
+		restoreAnnouncementBaseline(ctx);
+	});
+	pi.on("session_tree", (_event, ctx) => {
+		restoreAnnouncementBaseline(ctx);
+	});
 
 	// Defer announcements to turn boundaries so messages do not land mid-request.
 	function reconcileWithLocalFailClosedModes(options: { announce?: boolean } = {}): ToolModeResult {
@@ -134,11 +138,8 @@ export default function toolModeCoordinatorExtension(pi: ExtensionAPI): void {
 		const snapshot = coordinator.snapshot();
 		let result: ToolModeResult;
 		try {
-			result =
-				data.action === "set"
-					? coordinator.setMode(data.mode, data.enabled, data.options)
-					: coordinator.reconcile();
-			if (data.action === "set" && data.options?.persist) {
+			result = coordinator.setMode(data.mode, data.enabled, data.options);
+			if (data.options?.persist) {
 				pi.appendEntry<ToolModeCoordinatorState>(TOOL_MODE_STATE_ENTRY_TYPE, {
 					version: TOOL_MODE_STATE_VERSION,
 					baselineTools: [...(result.baselineTools ?? result.activeTools)],

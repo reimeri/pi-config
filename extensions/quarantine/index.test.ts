@@ -16,7 +16,7 @@ describe("shouldRestoreEnabled", () => {
 	});
 
 	test("stays disabled when neither source records quarantine", () => {
-		expect(shouldRestoreEnabled(disabledState, { activeModeIds: ["plan"] }, false)).toBe(false);
+		expect(shouldRestoreEnabled(disabledState, { activeModeIds: ["other-mode"] }, false)).toBe(false);
 	});
 
 	test("follows the legacy entry when no coordinator entry exists", () => {
@@ -27,7 +27,7 @@ describe("shouldRestoreEnabled", () => {
 	// Legacy-only activation must override stale coordinator state on resume.
 	test("keeps quarantine on when only the legacy entry records it", () => {
 		expect(shouldRestoreEnabled(enabledState, { activeModeIds: [] }, true)).toBe(true);
-		expect(shouldRestoreEnabled(enabledState, { activeModeIds: ["plan"] }, true)).toBe(true);
+		expect(shouldRestoreEnabled(enabledState, { activeModeIds: ["other-mode"] }, true)).toBe(true);
 	});
 
 	test("fails closed on unparseable state regardless of the coordinator entry", () => {

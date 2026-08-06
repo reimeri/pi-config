@@ -1,10 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type {
-	SetToolModeOptions,
-	ToolModeBaselinePatch,
-	ToolModeDefinition,
-	ToolModeResult,
-} from "./protocol.ts";
+import type { SetToolModeOptions, ToolModeDefinition, ToolModeResult } from "./protocol.ts";
 
 function uniqueToolNames(toolNames: string[]): string[] {
 	return [...new Set(toolNames)];
@@ -51,8 +46,6 @@ export class ToolModeCoordinator {
 			} else if (enabled && this.baselineTools === undefined) {
 				this.baselineTools = this.pi.getActiveTools();
 			}
-			this.patchBaseline(options.baselinePatch);
-
 			if (enabled) this.activeModes.set(mode.id, mode);
 			else this.activeModes.delete(mode.id);
 
@@ -123,16 +116,6 @@ export class ToolModeCoordinator {
 		}
 		this.activeModes.clear();
 		this.baselineTools = undefined;
-	}
-
-	private patchBaseline(patch: ToolModeBaselinePatch | undefined): void {
-		if (!patch || this.baselineTools === undefined) return;
-
-		const removed = new Set(patch.remove ?? []);
-		this.baselineTools = uniqueToolNames([
-			...this.baselineTools.filter((name) => !removed.has(name)),
-			...(patch.add ?? []),
-		]);
 	}
 
 	private sortedPolicies(): ToolModeDefinition[] {

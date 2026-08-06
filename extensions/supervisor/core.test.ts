@@ -65,7 +65,6 @@ describe("supervisorInstructions", () => {
 		expect(prompt).toContain("Worker verifies its assigned leaf with targeted checks");
 		expect(prompt).toContain("supervisor independently inspects or confirms");
 		expect(prompt).toContain("Bash remains available");
-		expect(prompt).toContain("In plan mode, do not delegate implementation");
 		expect(prompt).toContain("exists only while this mode is active");
 	});
 });
@@ -87,8 +86,8 @@ describe("supervisor tool-mode composition", () => {
 		priority: SUPERVISOR_MODE_PRIORITY,
 		apply: supervisorTools,
 	};
-	const plan: ToolModeDefinition = {
-		id: "plan",
+	const restricted: ToolModeDefinition = {
+		id: "restricted",
 		priority: 10,
 		apply: (tools) => tools.filter((name) => !["edit", "write", "todo_update"].includes(name)),
 	};
@@ -98,10 +97,10 @@ describe("supervisor tool-mode composition", () => {
 		apply: () => ["read", "grep", "find", "ls"],
 	};
 
-	test("keeps plan restrictions after supervisor is disabled", () => {
+	test("keeps lower-priority restrictions after supervisor is disabled", () => {
 		const state = setup();
 		state.coordinator.setMode(supervisor, true);
-		state.coordinator.setMode(plan, true);
+		state.coordinator.setMode(restricted, true);
 		state.coordinator.setMode(supervisor, false);
 
 		expect(state.tools()).toEqual(["read", "grep", "find", "ls", "bash", "subagent"]);

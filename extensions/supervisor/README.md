@@ -100,7 +100,6 @@ Concurrency protection is process-local. It prevents overlapping and back-to-bac
 
 Supervisor uses tool-mode priority 50:
 
-- **Plan mode (10):** both modes can remain active, but the supervisor prompt instructs the agent not to delegate implementation while planning.
 - **Quarantine (100):** quarantine remains authoritative and removes `subagent`, so delegation is unavailable until quarantine is disabled.
 
 The shared tool-mode coordinator owns baseline restoration and persisted active-mode state. Supervisor restores its state on session start, resume, reload, and tree navigation.
