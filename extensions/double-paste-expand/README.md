@@ -12,6 +12,7 @@ replace that marker with the full text in the editor.
 - Mouse input does not cancel the pair.
 - A different paste becomes the first paste of a new possible pair.
 - Other paste markers already present in the draft stay collapsed.
+- Expansion removes terminal-rendering padding at the end of each copied row, preventing those spaces from wrapping into extra visual lines. Leading indentation is preserved on every line.
 
 The extension decorates the active editor during `resources_discover`, after normal
 `session_start` editor setup. This allows it to compose with extensions such as

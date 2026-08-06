@@ -58,6 +58,13 @@ export function cleanPastedText(text: string, charBeforeCursor = ""): string {
 	return filtered;
 }
 
+export function cleanExpandedPastedText(text: string): string {
+	return text
+		.split("\n")
+		.map((line) => line.replace(/ +$/, ""))
+		.join("\n");
+}
+
 export function isLargePaste(text: string): boolean {
 	return text.split("\n").length > 10 || text.length > 1000;
 }
@@ -244,7 +251,7 @@ export class DoublePasteEditor implements EditorComponent {
 			return false;
 		}
 
-		this.base.insertTextAtCursor(candidate.cleanText);
+		this.base.insertTextAtCursor(cleanExpandedPastedText(candidate.cleanText));
 		return true;
 	}
 

@@ -5,6 +5,7 @@ import doublePasteExpandExtension from "./index.ts";
 import {
 	BRACKETED_PASTE_END,
 	BRACKETED_PASTE_START,
+	cleanExpandedPastedText,
 	cleanPastedText,
 	DoublePasteEditor,
 	isLargePaste,
@@ -111,6 +112,10 @@ class FakePiEditor implements EditorComponent {
 		this.pasteCounter = 0;
 	}
 
+	setCursor(index: number): void {
+		this.cursor = index;
+	}
+
 	insertTextAtCursor(text: string): void {
 		this.insert(text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    "));
 	}
@@ -155,6 +160,12 @@ describe("paste normalization", () => {
 		expect(cleanPastedText("/tmp/file", "x")).toBe(" /tmp/file");
 	});
 
+	test("removes only trailing ASCII terminal padding from expanded text", () => {
+		expect(cleanExpandedPastedText("  first  \nsecond\u00a0  \nthird\u2003  ")).toBe(
+			"  first\nsecond\u00a0\nthird\u2003",
+		);
+	});
+
 	test("uses Pi's strict large-paste thresholds", () => {
 		expect(isLargePaste(multiline("x", 10))).toBe(false);
 		expect(isLargePaste(multiline("x", 11))).toBe(true);
@@ -179,6 +190,69 @@ describe("DoublePasteEditor", () => {
 		paste(editor, content);
 		expect(editor.getText()).toBe(content);
 		expect(editor.getExpandedText()).toBe(content);
+	});
+
+	test("removes copied terminal row padding without adding visual lines", () => {
+		const { editor } = wrap();
+		const terminalCopy = [
+			" pi v0.84.0".padEnd(300),
+			" escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more".padEnd(300),
+			" Press ctrl+o to show full startup help and loaded resources.".padEnd(300),
+			"".padEnd(300),
+			" Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.".padEnd(300),
+		].join("\n");
+		const expected = [
+			" pi v0.84.0",
+			" escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more",
+			" Press ctrl+o to show full startup help and loaded resources.",
+			"",
+			" Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.",
+		].join("\n");
+
+		paste(editor, terminalCopy);
+		expect(editor.getText()).toBe(`[paste #1 ${terminalCopy.length} chars]`);
+		expect(editor.getExpandedText()).toBe(terminalCopy);
+		paste(editor, terminalCopy);
+		expect(editor.getText()).toBe(expected);
+		expect(editor.getExpandedText()).toBe(expected);
+	});
+
+	test("preserves leading indentation when expanding inside an existing draft", () => {
+		const { base, editor } = wrap();
+		base.setText("prefix");
+		const terminalCopy = "  indented".padEnd(1001);
+
+		paste(editor, terminalCopy);
+		expect(editor.getText()).toBe("prefix[paste #1 1001 chars]");
+		paste(editor, terminalCopy);
+		expect(editor.getText()).toBe("prefix  indented");
+	});
+
+	test("preserves leading blank lines and a trailing newline", () => {
+		const { editor } = wrap();
+		const terminalCopy = [
+			"".padEnd(300),
+			"".padEnd(300),
+			"  indented".padEnd(300),
+			"".padEnd(300),
+			"",
+		].join("\n");
+
+		paste(editor, terminalCopy);
+		paste(editor, terminalCopy);
+		expect(editor.getText()).toBe("\n\n  indented\n\n");
+	});
+
+	test("preserves indentation when expanding before existing suffix text", () => {
+		const { base, editor } = wrap();
+		base.setText("suffix");
+		base.setCursor(0);
+		const terminalCopy = "  indented".padEnd(1001);
+
+		paste(editor, terminalCopy);
+		expect(editor.getText()).toBe("[paste #1 1001 chars]suffix");
+		paste(editor, terminalCopy);
+		expect(editor.getText()).toBe("  indentedsuffix");
 	});
 
 	test("works with Pi's real CustomEditor marker bookkeeping", () => {
