@@ -27,7 +27,7 @@ function model(overrides: Record<string, unknown>) {
 	} as any;
 }
 
-function context(apiKey: string | undefined = "test-key", headers: Record<string, string> = {}, fallbackKey?: string) {
+function context(apiKey: string | undefined = "test-key", headers: Record<string, string | null> = {}, fallbackKey?: string) {
 	return {
 		modelRegistry: {
 			async getApiKeyAndHeaders() { return { ok: true, apiKey, headers }; },
@@ -111,6 +111,24 @@ describe("provider adapters", () => {
 			]);
 		};
 		const result = await callProvider(context(undefined, { "api-key": "azure-key" }), model({}), { query: "docs", urls: [] });
+		expect(result.text).toBe("Authenticated");
+	});
+
+	test("honors resolved header-deletion markers", async () => {
+		globalThis.fetch = async (_url, init) => {
+			const headers = new Headers(init?.headers);
+			expect(headers.get("authorization")).toBeNull();
+			expect(headers.get("api-key")).toBe("azure-key");
+			return sse([
+				{ type: "response.output_text.delta", delta: "Authenticated" },
+				{ type: "response.completed", response: { output: [] } },
+			]);
+		};
+		const result = await callProvider(
+			context(undefined, { authorization: null, "api-key": "azure-key" }),
+			model({ headers: { authorization: "Bearer placeholder" } }),
+			{ query: "docs", urls: [] },
+		);
 		expect(result.text).toBe("Authenticated");
 	});
 

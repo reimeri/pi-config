@@ -14,7 +14,10 @@ export async function resolveAuth(ctx: ExtensionContext, model: Model<Api>): Pro
 	const resolved = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!resolved.ok) throw new Error(resolved.error || "Failed to resolve model authentication");
 	const headers = new Headers(model.headers || {});
-	for (const [name, value] of Object.entries(resolved.headers || {})) headers.set(name, value);
+	for (const [name, value] of Object.entries(resolved.headers ?? {})) {
+		if (value === null) headers.delete(name);
+		else headers.set(name, value);
+	}
 	let apiKey = resolved.apiKey;
 	if (!apiKey && !hasAuthHeader(headers)) {
 		apiKey = await ctx.modelRegistry.getApiKeyForProvider(model.provider);
