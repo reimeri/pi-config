@@ -11,13 +11,7 @@ export interface ToolModeDefinition {
 	apply: (toolNames: string[]) => string[];
 }
 
-export interface ToolModeBaselinePatch {
-	add?: string[];
-	remove?: string[];
-}
-
 export interface SetToolModeOptions {
-	baselinePatch?: ToolModeBaselinePatch;
 	baselineSeed?: string[];
 	persist?: boolean;
 }
@@ -53,15 +47,11 @@ export interface SetToolModeRequest extends ToolModeRequestCallbacks {
 	options?: SetToolModeOptions;
 }
 
-export interface ReconcileToolModesRequest extends ToolModeRequestCallbacks {
-	action: "reconcile";
-}
-
-export type ToolModeRequest = SetToolModeRequest | ReconcileToolModesRequest;
+export type ToolModeRequest = SetToolModeRequest;
 
 function sendRequest(
 	events: ExtensionAPI["events"],
-	request: Omit<SetToolModeRequest, keyof ToolModeRequestCallbacks> | Omit<ReconcileToolModesRequest, keyof ToolModeRequestCallbacks>,
+	request: Omit<SetToolModeRequest, keyof ToolModeRequestCallbacks>,
 ): Promise<ToolModeRequestResult> {
 	return new Promise((resolve) => {
 		let acknowledged = false;
@@ -142,34 +132,26 @@ export function persistedToolModeBaseline(ctx: ExtensionContext): string[] | und
 	if (persistedState) return persistedState.baselineTools;
 
 	const branch = ctx.sessionManager.getBranch();
-	// Recover the unconstrained baseline from the first mode in legacy overlapping cycles.
-	let planEnabled = false;
 	let quarantineEnabled = false;
 	let cycleBaseline: string[] | undefined;
 	let lastRestored: string[] | undefined;
 	for (const entry of branch) {
-		if (entry.type !== "custom" || !entry.data || typeof entry.data !== "object") continue;
-		const state = entry.data as Record<string, unknown>;
-		if (entry.customType === "plan-mode" && typeof state.enabled === "boolean") {
-			const tools = stateToolNames(state.toolsBeforePlanMode);
-			if (state.enabled && !planEnabled && !quarantineEnabled) {
-				cycleBaseline = tools ?? lastRestored;
-			}
-			if (!state.enabled && tools) lastRestored = tools;
-			planEnabled = state.enabled;
-		} else if (
-			entry.customType === "quarantine-state" &&
-			typeof state.enabled === "boolean"
+		if (
+			entry.type !== "custom" ||
+			entry.customType !== "quarantine-state" ||
+			!entry.data ||
+			typeof entry.data !== "object"
 		) {
-			const tools = state.enabled
-				? stateToolNames(state.toolsBeforeQuarantine)
-				: stateToolNames(state.restoredTools);
-			if (state.enabled && !planEnabled && !quarantineEnabled) {
-				cycleBaseline = tools ?? lastRestored;
-			}
-			if (!state.enabled && tools) lastRestored = tools;
-			quarantineEnabled = state.enabled;
+			continue;
 		}
+		const state = entry.data as Record<string, unknown>;
+		if (typeof state.enabled !== "boolean") continue;
+		const tools = state.enabled
+			? stateToolNames(state.toolsBeforeQuarantine)
+			: stateToolNames(state.restoredTools);
+		if (state.enabled && !quarantineEnabled) cycleBaseline = tools ?? lastRestored;
+		if (!state.enabled && tools) lastRestored = tools;
+		quarantineEnabled = state.enabled;
 	}
 	return cycleBaseline ?? lastRestored;
 }
@@ -197,14 +179,4 @@ export function locallyActiveToolModeReports(
 		// Coordinator state is primary; local reporting preserves emergency fail-closed behavior.
 	}
 	return [...reports.values()];
-}
-
-export function locallyActiveToolModes(events: ExtensionAPI["events"]): string[] {
-	return locallyActiveToolModeReports(events).map((report) => report.modeId);
-}
-
-export function reconcileToolModes(
-	events: ExtensionAPI["events"],
-): Promise<ToolModeRequestResult> {
-	return sendRequest(events, { action: "reconcile" });
 }

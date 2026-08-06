@@ -2,12 +2,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import {
-	MAX_TODOS,
-	TODO_CREATE_FROM_PLAN_REQUEST_EVENT,
-	type PlanTodoCreationRequest,
-	type TodoStatus,
-} from "./protocol.ts";
+import { MAX_TODOS, type TodoStatus } from "./protocol.ts";
 import {
 	counts,
 	formatTodoReminder,
@@ -17,7 +12,6 @@ import {
 	type Todo,
 } from "./core.ts";
 
-const TODO_STATE_ENTRY_TYPE = "todos-state";
 const TODO_STATE_VERSION = 1;
 const MAX_WIDGET_ITEMS = 4;
 const MAX_DIALOG_ITEMS = 12;
@@ -123,16 +117,6 @@ function isTodoDetails(value: unknown): value is TodoDetails {
 	if (!value || typeof value !== "object") return false;
 	const details = value as Partial<TodoDetails>;
 	return details.version === TODO_STATE_VERSION && Array.isArray(details.todos);
-}
-
-function isPlanTodoCreationRequest(value: unknown): value is PlanTodoCreationRequest {
-	if (!value || typeof value !== "object") return false;
-	const request = value as Partial<PlanTodoCreationRequest>;
-	return (
-		Array.isArray(request.steps) &&
-		typeof request.acknowledge === "function" &&
-		typeof request.respond === "function"
-	);
 }
 
 function themedTodoLine(todo: Todo, theme: Theme): string {
@@ -242,7 +226,6 @@ class TodoListComponent {
 
 export default function todoExtension(pi: ExtensionAPI): void {
 	let todos: Todo[] = [];
-	let currentCtx: ExtensionContext | undefined;
 
 	function updateUI(ctx: ExtensionContext): void {
 		// Clear footer progress left by older versions.
@@ -265,8 +248,6 @@ export default function todoExtension(pi: ExtensionAPI): void {
 				if (message.role === "toolResult" && message.toolName === TODO_TOOL_NAME && isTodoDetails(message.details)) {
 					details = message.details;
 				}
-			} else if (entry.type === "custom" && entry.customType === TODO_STATE_ENTRY_TYPE && isTodoDetails(entry.data)) {
-				details = entry.data;
 			}
 			if (!details) continue;
 			try {
@@ -279,63 +260,10 @@ export default function todoExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
-		currentCtx = ctx;
 		reconstructState(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => {
-		currentCtx = ctx;
 		reconstructState(ctx);
-	});
-
-	const unsubscribePlanTodoCreation = pi.events.on(TODO_CREATE_FROM_PLAN_REQUEST_EVENT, async (data) => {
-		if (!isPlanTodoCreationRequest(data)) return;
-		data.acknowledge();
-
-		try {
-			const ctx = currentCtx;
-			if (!ctx) {
-				data.respond({ status: "unavailable", message: "The todos extension has no active session." });
-				return;
-			}
-			const nextTodos = normalizeTodos(
-				data.steps.map((text, index) => ({
-					id: `plan-${index + 1}`,
-					text,
-					status: index === 0 ? "in_progress" : "pending",
-				})),
-			);
-			const hasUnfinishedTodos = todos.some((todo) => todo.status !== "completed");
-			if (hasUnfinishedTodos) {
-				const replace = await ctx.ui.confirm(
-					"Replace unfinished TODOs?",
-					"Executing this plan will replace the current unfinished TODO list.",
-				);
-				if (!replace) {
-					data.respond({ status: "cancelled" });
-					return;
-				}
-			}
-
-			const details: TodoDetails = {
-				version: TODO_STATE_VERSION,
-				todos: cloneTodos(nextTodos),
-				explanation: normalizeExplanation(data.explanation),
-			};
-			pi.appendEntry(TODO_STATE_ENTRY_TYPE, details);
-			todos = nextTodos;
-			updateUI(ctx);
-			data.respond({ status: "applied" });
-		} catch (error) {
-			data.respond({
-				status: "unavailable",
-				message: error instanceof Error ? error.message : "Unable to create TODOs from the plan.",
-			});
-		}
-	});
-
-	pi.on("session_shutdown", () => {
-		currentCtx = undefined;
-		unsubscribePlanTodoCreation();
 	});
 
 	pi.on("context", (event) => {
@@ -363,7 +291,6 @@ export default function todoExtension(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use todo_update for work with multiple substantive implementation or verification steps; do not use it for trivial single-step requests.",
 			"Call todo_update once requirements are clear and before beginning multi-step implementation. Do not use it merely to restate a read-only plan.",
-			"When plan mode creates the initial TODO list, use todo_update for all subsequent execution progress.",
 			"Pass the complete canonical list to todo_update on every call, preserving stable IDs and replacing stale completed lists when a new task begins.",
 			"Keep at most one todo_update item in_progress, and mark an item completed immediately after its work is verified before advancing to the next item.",
 			"Do not mark todo_update items completed before verification. At the end, leave the fully completed list visible rather than clearing it.",

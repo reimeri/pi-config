@@ -92,8 +92,8 @@ describe("current task editor mode colors", () => {
 		expect(thinkingLowLines.every((line: string) => line.includes("<thinkingLow>"))).toBe(true);
 
 		events.emit("editor-top-bar:mode", {
-			id: "plan-mode",
-			label: "⏸️ plan",
+			id: "warning-mode",
+			label: "warning",
 			borderColor: "warning",
 		});
 		const warningLines = editor.render(40);

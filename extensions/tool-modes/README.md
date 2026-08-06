@@ -21,17 +21,8 @@ await setToolMode(pi.events, mode, false, { persist: true }); // disable
 
 Each request includes the policy so extension load order does not matter. Only `tool-modes/index.ts` calls `pi.setActiveTools()` during normal coordinated operation.
 
-Policies compose from lowest to highest priority. An absolute policy can ignore its input and return a fixed set. Quarantine uses priority 100 and an absolute policy, so it overrides plan mode at priority 10.
+Policies compose from lowest to highest priority. An absolute policy can ignore its input and return a fixed set. Quarantine uses priority 100 and an absolute policy, so it overrides lower-priority modes.
 
-The coordinator composes tool sets; it does not by itself make a mode enforceable. A mode that must actually hold — quarantine — additionally needs a default-deny `tool_call` gate, because tools can be invoked while in flight or activated by another extension between reconciliations. Plan mode deliberately has no such gate: it is a nudge toward planning, not a sandbox. See `plan-mode/README.md`.
-
-Use a baseline patch when disabling a mode must intentionally change normal access. Plan execution uses this to ensure `todo_update` is present:
-
-```ts
-await setToolMode(pi.events, mode, false, {
-  baselinePatch: { add: ["todo_update"] },
-  persist: true,
-});
-```
+The coordinator composes tool sets; it does not by itself make a mode enforceable. A mode that must actually hold — quarantine — additionally needs a default-deny `tool_call` gate, because tools can be invoked while in flight or activated by another extension between reconciliations.
 
 When `persist` is requested, the coordinator atomically records the shared baseline and active mode IDs as the canonical restoration state. It reapplies active policies before agent runs and after turns, and restores the baseline during session shutdown. Before every model turn it also appends hidden context with the reconciled active modes and tools, including locally reported fail-closed modes, preventing stale conversation history from making the model treat a disabled mode as active. Individual modes remain responsible for their prompts, UI, tool-call guards, and any legacy-compatible state entries.
