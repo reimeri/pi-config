@@ -23,6 +23,7 @@ import {
 	GATE_WAIT_MS,
 	type GateFailure,
 } from "./concurrency.ts";
+import { createSubagentPromptMetadata } from "./guidance.ts";
 import { LineStream } from "./line-stream.ts";
 import {
 	CHILD_TERMINATION_GRACE_MS,
@@ -623,18 +624,12 @@ export default function (pi: ExtensionAPI) {
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder). Agents that mutate the workspace cannot run in chain mode; give each one its own single call so you can inspect its result before delegating the next task.",
 			"Long agent output is capped; when it is, the result ends with a notice giving the path to a file holding the full text, which you can read if the omitted part matters.",
 			"Results for agents that change files end with an \"Observed workspace changes\" section measured by this tool rather than reported by the agent; reconcile it against what the agent claims it changed.",
-			"Make every task self-contained; for follow-up work, include the relevant prior findings and context instead of assuming the agent remembers them.",
+			"Make every unkeyed task self-contained. For a sessionKey follow-up, provide the fixes, changed paths, and verification evidence that occurred outside the child's retained context.",
 			`Models, thinking levels, tools, and prompts are configured in agent Markdown files under ${path.join(getAgentDir(), "agents")}.`,
 			`To enable project-local agents in ${CONFIG_DIR_NAME}/agents, set agentScope: "both" (or "project").`,
 		].join(" "),
-		promptSnippet: "Delegate isolated codebase exploration, independent code review, and broader web research to specialized subagents",
-		promptGuidelines: [
-			// Keep the installed-agent list in the tool description rather than duplicating it here.
-			"Use subagent for work that would consume substantial main-agent context — broad codebase exploration, an independent review after meaningful changes, or research that benefits from source evaluation; the tool description lists the installed agents and what each is for.",
-			"Every subagent invocation starts with fresh context and does not automatically receive the parent conversation or prior subagent calls; pass needed context explicitly in the task (chain mode may use {previous}) and never assume agent memory.",
-			"Give subagent focused, self-contained tasks with the relevant requirements, paths, symbols, constraints, and acceptance criteria; do not delegate trivial lookups, and verify consequential findings before editing.",
-			"For follow-up tasks, include a concise handoff of the prior findings, affected locations, failure scenarios, and expected resolution; quote prior output when exact details matter rather than referring to 'your previous review'.",
-		],
+		// Keep the installed-agent list in the tool description rather than duplicating it here.
+		...createSubagentPromptMetadata(),
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {

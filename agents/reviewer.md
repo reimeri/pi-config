@@ -44,6 +44,14 @@ When reviewing implementation:
 2. Read the modified files and relevant surrounding contracts.
 3. Check correctness, security, maintainability, regressions, and whether tests prove the acceptance criteria.
 
+## Follow-up review
+
+When the assignment asks you to re-check named findings after fixes:
+1. Treat the assignment's finding list, fix summary, changed paths, and verification evidence as the complete review scope. Use retained earlier context when available, but treat the new assignment as authoritative.
+2. Re-read the changed code and only the contracts needed to verify those findings. Do not repeat repository discovery or another full review.
+3. Report only a named finding that remains unresolved or a regression introduced by its fix. Do not reopen unrelated pre-existing concerns or add optional suggestions.
+4. For a blocker-only check, report only whether the specified release blocker remains. If it is resolved, say so directly and stop; this concise answer overrides the general multi-section format below.
+
 Use this format:
 
 ## Files Reviewed

@@ -71,7 +71,7 @@ The model should use `provider/model` syntax. Agent definitions are read fresh f
 
 Chain mode rejects any agent that declares a concurrency group, including a chain containing only one. Editing agents run as separate single calls so the parent inspects each result before the next task starts.
 
-Children run as ephemeral JSON-mode Pi processes. Every invocation starts with fresh context and does not automatically receive the parent conversation or context from prior subagent invocations. Context must be supplied explicitly in the task, including through chain mode's `{previous}` placeholder. Task text must therefore be self-contained. Follow-up tasks should carry forward the relevant prior findings, affected paths or symbols, failure scenarios, expected resolution, and acceptance criteria rather than assuming agent memory; quote prior output when exact details matter. The `subagent` tool is explicitly disabled in children to prevent recursive delegation.
+Children run as ephemeral JSON-mode Pi processes. By default, every unkeyed invocation starts with fresh context and does not automatically receive the parent conversation or context from prior subagent invocations. Context must be supplied explicitly in an unkeyed task, including through chain mode's `{previous}` placeholder. A keyed resumption retains the child's earlier context as described below, but still needs a handoff for parent-side changes and evidence. The `subagent` tool is explicitly disabled in children to prevent recursive delegation.
 
 ## Reusable sessions
 
@@ -96,6 +96,19 @@ Sessions are:
 A key the tool cannot honour, because no temp directory could be made, does not fail the run: the child runs without a session, and the note says the session was unavailable instead of giving a run number. That matters to the parent rather than to the child, since the task was likely written as a delta against context the child now does not have.
 
 Reuse trades isolation for cost. A resumed agent arrives holding its earlier assignments, its own suggestions about what to do next, and any wrong turns it took, so it suits successive tasks on the same code and not unrelated work. Context also accumulates across runs, and a session left to grow will eventually stop against the output limit — which is reported as a `length` failure. The run number and context size in the note are there to show when to start a new key.
+
+### Review workflow
+
+Call `reviewer` when the user asks for independent review or the specification/change affects runtime behavior, public or cross-component contracts, security/authentication/permissions/secrets, persistence/migrations/data-loss risk, concurrency/process lifecycle, compatibility, or multiple components. Skip it only when deterministic checks establish that every change is non-behavioral, such as formatting or comments, or generated output/metadata cleanup proven not to affect runtime behavior or compatibility. Documentation that defines behavior, APIs, operations, or requirements meets the contract trigger and must not use this skip exception.
+
+A qualifying implementation review cycle has this default shape:
+
+1. Give the initial full review a stable `sessionKey`.
+2. Validate its findings against the requirements and current code before editing; suggestions and scope-expanding warnings are not automatic assignments.
+3. Reuse the same reviewer, cwd, and key for one targeted follow-up. Name the prior findings, fixes, changed paths, and verification evidence, and ask only whether those findings remain or their fixes introduced regressions.
+4. Stop delegating and verify directly. A third, blocker-only review is reserved for an unresolved critical release blocker involving security/authentication, data loss/persistence/migration, concurrency/process lifecycle, or compatibility, and reuses the same key.
+
+The follow-up reviewer uses its retained context to avoid rediscovering unchanged files and contracts. It does not see parent-side edits or test results automatically, which is why the delta handoff remains required.
 
 ### Prompt caching
 

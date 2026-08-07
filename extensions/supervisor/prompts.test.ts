@@ -43,5 +43,11 @@ describe("supervisor agent prompts", () => {
 		expect(reviewer?.systemPrompt).toContain("independently reviewable leaf tasks");
 		expect(reviewer?.systemPrompt).toContain("## Readiness");
 		expect(reviewer?.systemPrompt).toContain("## Code review");
+		expect(reviewer?.systemPrompt).toContain("## Follow-up review");
+		expect(reviewer?.systemPrompt).toContain("finding list, fix summary, changed paths, and verification evidence as the complete review scope");
+		expect(reviewer?.systemPrompt).toContain("Do not repeat repository discovery or another full review");
+		expect(reviewer?.systemPrompt).toContain("Do not reopen unrelated pre-existing concerns or add optional suggestions");
+		expect(reviewer?.systemPrompt).toContain("For a blocker-only check, report only whether the specified release blocker remains");
+		expect(reviewer?.systemPrompt).toContain("this concise answer overrides the general multi-section format below");
 	});
 });
