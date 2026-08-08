@@ -60,6 +60,7 @@ export class BackgroundProcessManager {
 	private readonly config: BackgroundTerminalConfig;
 	private readonly foregroundReadinessWaitMs: number;
 	private readonly jobs = new Map<string, ManagedJob>();
+	private readonly runningCountListeners = new Map<(count: number) => void, number>();
 	private nextId = 1;
 	private shutdownPromise?: Promise<void>;
 
@@ -92,6 +93,17 @@ export class BackgroundProcessManager {
 		return [...this.jobs.values()].filter(
 			(job) => !isFinalStatus(job.snapshot.status) || this.processGroupExists(job),
 		).length;
+	}
+
+	onRunningCountChange(listener: (count: number) => void): () => void {
+		const count = this.runningCount;
+		this.runningCountListeners.set(listener, count);
+		try {
+			listener(count);
+		} catch {
+			// Footer/status listeners must not affect process management.
+		}
+		return () => this.runningCountListeners.delete(listener);
 	}
 
 	async start(options: StartBackgroundJobOptions): Promise<StartBackgroundJobResult> {
@@ -178,6 +190,7 @@ export class BackgroundProcessManager {
 			terminationRequested: false,
 		};
 		this.jobs.set(id, job);
+		this.notifyRunningCountChange();
 		this.attachProcessListeners(job);
 
 		try {
@@ -255,6 +268,7 @@ export class BackgroundProcessManager {
 		} else {
 			// Preserve the leader's outcome when only lingering descendants were signalled.
 			job.snapshot.status = isFinalStatus(statusBeforeKill) ? statusBeforeKill : "killed";
+			this.notifyRunningCountChange();
 		}
 		return this.snapshot(job);
 	}
@@ -465,6 +479,7 @@ export class BackgroundProcessManager {
 			if (this.processGroupExists(job)) return;
 			this.stopGroupMonitor(job);
 			this.pruneCompletedJobs();
+			this.notifyRunningCountChange();
 		}, 250);
 		job.groupMonitor.unref();
 	}
@@ -485,7 +500,6 @@ export class BackgroundProcessManager {
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
 			job.groupKnownGone = true;
-			this.stopGroupMonitor(job);
 			return false;
 		}
 	}
@@ -523,5 +537,19 @@ export class BackgroundProcessManager {
 		job.resolveClose();
 		this.startGroupMonitor(job);
 		this.pruneCompletedJobs();
+		this.notifyRunningCountChange();
+	}
+
+	private notifyRunningCountChange(): void {
+		const count = this.runningCount;
+		for (const [listener, previousCount] of [...this.runningCountListeners]) {
+			if (count === previousCount) continue;
+			this.runningCountListeners.set(listener, count);
+			try {
+				listener(count);
+			} catch {
+				// Observers must not affect process management.
+			}
+		}
 	}
 }

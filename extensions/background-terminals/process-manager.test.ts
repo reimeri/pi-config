@@ -193,3 +193,54 @@ test("process exit settles asynchronous readiness without a later timeout overwr
 		await manager.shutdown();
 	}
 });
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (predicate()) return;
+		await sleep(10);
+	}
+	throw new Error("Timed out waiting for background process state");
+}
+
+test("notifies subscribers independently when the running count changes", async () => {
+	const manager = new BackgroundProcessManager(config, 100);
+	const firstCounts: number[] = [];
+	const secondCounts: number[] = [];
+	const unsubscribeFirst = manager.onRunningCountChange((count) => firstCounts.push(count));
+	let unsubscribeSecond = () => {};
+	try {
+		await manager.start({ command: "sleep 0.05", cwd: process.cwd() });
+		unsubscribeSecond = manager.onRunningCountChange((count) => secondCounts.push(count));
+		await waitUntil(() => firstCounts.at(-1) === 0 && secondCounts.at(-1) === 0);
+
+		expect(firstCounts).toEqual([0, 1, 0]);
+		expect(secondCounts).toEqual([1, 0]);
+	} finally {
+		unsubscribeFirst();
+		unsubscribeSecond();
+		await manager.shutdown();
+	}
+});
+
+test("keeps finalized leaders counted until their process group exits", async () => {
+	const manager = new BackgroundProcessManager(config, 100);
+	const counts: number[] = [];
+	manager.onRunningCountChange((count) => counts.push(count));
+	try {
+		const result = await manager.start({
+			command: "sleep 0.4 </dev/null >/dev/null 2>&1 &",
+			cwd: process.cwd(),
+		});
+		await waitUntil(() => manager.get(result.job.id)?.status === "exited");
+
+		expect(manager.runningCount).toBe(1);
+		expect(counts).toEqual([0, 1]);
+
+		await waitUntil(() => counts.at(-1) === 0);
+		expect(manager.runningCount).toBe(0);
+		expect(counts).toEqual([0, 1, 0]);
+	} finally {
+		await manager.shutdown();
+	}
+});
