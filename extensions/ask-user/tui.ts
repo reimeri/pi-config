@@ -7,8 +7,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
 	Container,
+	Editor,
+	type EditorTheme,
 	type Focusable,
-	Input,
 	type KeybindingsManager,
 	Spacer,
 	Text,
@@ -112,8 +113,8 @@ class AskUserSelector extends Container {
 	}
 }
 
-class AskUserInput extends Container implements Focusable {
-	private readonly input = new Input();
+class AskUserEditor extends Container implements Focusable {
+	private readonly editor: Editor;
 	private _focused = false;
 
 	get focused(): boolean {
@@ -122,10 +123,11 @@ class AskUserInput extends Container implements Focusable {
 
 	set focused(value: boolean) {
 		this._focused = value;
-		this.input.focused = value;
+		this.editor.focused = value;
 	}
 
 	constructor(
+		tui: TUI,
 		private readonly title: string,
 		private readonly placeholder: string | undefined,
 		private readonly cancelLabel: AskUserDialogOptions["cancelLabel"],
@@ -136,6 +138,18 @@ class AskUserInput extends Container implements Focusable {
 		private readonly onCancel: () => void,
 	) {
 		super();
+		const editorTheme: EditorTheme = {
+			borderColor: (text: string) => this.theme.fg("border", text),
+			selectList: {
+				selectedPrefix: (text: string) => this.theme.fg("accent", text),
+				selectedText: (text: string) => this.theme.fg("accent", text),
+				description: (text: string) => this.theme.fg("muted", text),
+				scrollInfo: (text: string) => this.theme.fg("dim", text),
+				noMatch: (text: string) => this.theme.fg("warning", text),
+			},
+		};
+		this.editor = new Editor(tui, editorTheme);
+		this.editor.onSubmit = this.onSubmit;
 		this.rebuild();
 	}
 
@@ -145,14 +159,17 @@ class AskUserInput extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(this.theme.fg("accent", this.title), 1, 0));
 		this.addChild(new Spacer(1));
-		if (this.placeholder && this.input.getValue() === "") {
+		if (this.placeholder && this.editor.getText() === "") {
 			this.addChild(new Text(this.theme.fg("dim", this.placeholder), 1, 0));
 		}
-		this.addChild(this.input);
+		this.addChild(this.editor);
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Text(
-				`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", this.cancelLabel)}`,
+				`${keyHint("tui.input.submit", "submit")}  ${keyHint("tui.input.newLine", "newline")}  ${keyHint(
+					"tui.select.cancel",
+					this.cancelLabel,
+				)}`,
 				1,
 				0,
 			),
@@ -162,15 +179,11 @@ class AskUserInput extends Container implements Focusable {
 	}
 
 	handleInput(data: string): void {
-		if (this.keybindings.matches(data, "tui.select.confirm") || data === "\n") {
-			this.onSubmit(this.input.getValue());
-			return;
-		}
 		if (this.keybindings.matches(data, "tui.select.cancel")) {
 			this.onCancel();
 			return;
 		}
-		this.input.handleInput(data);
+		this.editor.handleInput(data);
 		this.rebuild();
 		this.requestRender();
 	}
@@ -189,7 +202,7 @@ async function showAbortableDialog<T>(
 		theme: Theme,
 		keybindings: KeybindingsManager,
 		done: (value: T | undefined) => void,
-	) => AskUserSelector | AskUserInput,
+	) => AskUserSelector | AskUserEditor,
 ): Promise<T | undefined> {
 	if (signal?.aborted) return undefined;
 	let close: ((value: T | undefined) => void) | undefined;
@@ -216,7 +229,7 @@ export function createAskUserUI(ui: ExtensionUIContext, customDialogs: boolean):
 					options.map((option) => option.value),
 					{ signal: opts.signal },
 				),
-			input: (title, placeholder, opts) => ui.input(title, placeholder, { signal: opts.signal }),
+			editor: (title, placeholder, opts) => ui.input(title, placeholder, { signal: opts.signal }),
 		};
 	}
 
@@ -234,9 +247,10 @@ export function createAskUserUI(ui: ExtensionUIContext, customDialogs: boolean):
 					() => done(undefined),
 				),
 			),
-		input: (title, placeholder, opts) =>
+		editor: (title, placeholder, opts) =>
 			showAbortableDialog<string>(ui, opts.signal, (tui, theme, keybindings, done) =>
-				new AskUserInput(
+				new AskUserEditor(
+					tui,
 					title,
 					placeholder,
 					opts.cancelLabel,

@@ -16,7 +16,7 @@ class FakeUI implements AskUserUI {
 		options: AskUserSelectOption[];
 		cancelLabel: AskUserDialogOptions["cancelLabel"];
 	}> = [];
-	readonly inputCalls: Array<{
+	readonly editorCalls: Array<{
 		title: string;
 		placeholder?: string;
 		cancelLabel: AskUserDialogOptions["cancelLabel"];
@@ -39,13 +39,13 @@ class FakeUI implements AskUserUI {
 		return typeof action === "function" ? action(title, values) : action;
 	}
 
-	async input(
+	async editor(
 		title: string,
 		placeholder: string | undefined,
 		opts: AskUserDialogOptions,
 	): Promise<string | undefined> {
-		this.inputCalls.push({ title, placeholder, cancelLabel: opts.cancelLabel });
-		if (this.inputActions.length === 0) throw new Error(`Unexpected input: ${title}`);
+		this.editorCalls.push({ title, placeholder, cancelLabel: opts.cancelLabel });
+		if (this.inputActions.length === 0) throw new Error(`Unexpected editor: ${title}`);
 		return this.inputActions.shift();
 	}
 }
@@ -103,9 +103,19 @@ describe("runAskUserFlow", () => {
 
 		expect(result.status).toBe("answered");
 		expect(result.answers[0]?.answer).toBe("Small");
-		expect(ui.inputCalls[0]?.title).not.toContain("[Esc:");
-		expect(ui.inputCalls[0]?.cancelLabel).toBe("back");
+		expect(ui.editorCalls[0]?.title).not.toContain("[Esc:");
+		expect(ui.editorCalls[0]?.cancelLabel).toBe("back");
 		expect(ui.selectCalls.filter((call) => call.title.includes("Which scope?")).length).toBe(2);
+	});
+
+	test("preserves multiline free-form answers", async () => {
+		const ui = new FakeUI([option("Other"), option("Submit answers")], ["First line\nSecond line"]);
+
+		const result = await runAskUserFlow([questions[0]!], ui);
+
+		expect(result.status).toBe("answered");
+		expect(result.answers[0]?.answer).toBe("First line\nSecond line");
+		expect(result.answers[0]?.wasCustom).toBe(true);
 	});
 
 	test("review allows an earlier answer to be edited before submission", async () => {
@@ -255,8 +265,8 @@ describe("runAskUserFlow", () => {
 
 		expect(result.status).toBe("cancelled");
 		expect(ui.selectCalls).toHaveLength(1);
-		expect(ui.inputCalls[0]?.title).not.toContain("Esc:");
-		expect(ui.inputCalls[0]?.cancelLabel).toBe("cancel");
+		expect(ui.editorCalls[0]?.title).not.toContain("Esc:");
+		expect(ui.editorCalls[0]?.cancelLabel).toBe("cancel");
 	});
 
 	test("an aborted dialog is not mistaken for back navigation", async () => {

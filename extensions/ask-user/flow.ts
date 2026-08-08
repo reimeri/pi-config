@@ -44,7 +44,7 @@ export interface AskUserUI {
 		options: AskUserSelectOption[],
 		opts: AskUserDialogOptions,
 	): Promise<string | undefined>;
-	input(
+	editor(
 		title: string,
 		placeholder: string | undefined,
 		opts: AskUserDialogOptions,
@@ -108,7 +108,7 @@ async function promptQuestion(
 	const cancelLabel = allowBackNavigation && backDestination !== "cancel" ? "back" : "cancel";
 
 	if (question.options.length === 0) {
-		const custom = await ui.input(title, question.placeholder ?? "Type your answer", { signal, cancelLabel });
+		const custom = await ui.editor(title, question.placeholder ?? "Type your answer", { signal, cancelLabel });
 		if (custom === undefined) {
 			return { type: signal?.aborted ? "aborted" : allowBackNavigation ? "back" : "cancel" };
 		}
@@ -149,7 +149,7 @@ async function promptQuestion(
 		}
 
 		if (selected !== otherChoice) continue;
-		const custom = await ui.input(
+		const custom = await ui.editor(
 			`Custom answer${position}: ${question.question}`,
 			question.placeholder ?? "Type your answer",
 			{ signal, cancelLabel: allowBackNavigation ? "back" : "cancel" },
