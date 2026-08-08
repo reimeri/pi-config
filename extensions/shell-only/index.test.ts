@@ -170,7 +170,7 @@ describe("shell-only extension", () => {
 		expect(state.modeUpdates.at(-1)).toMatchObject({
 			label: "$ shell only",
 			compactLabel: "$",
-			borderColor: "warning",
+			borderColor: "thinkingLow",
 		});
 		// The coordinator owns the sole reconciliation hook; shell-only adds no prompt guidance.
 		expect(state.handlers.get("before_agent_start")).toHaveLength(1);

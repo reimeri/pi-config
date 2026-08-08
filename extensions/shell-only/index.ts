@@ -43,7 +43,7 @@ export default function shellOnlyExtension(pi: ExtensionAPI): void {
 		setEditorTopBarMode(pi, SHELL_ONLY_MODE_ID, enabled ? "$ shell only" : undefined, {
 			compactLabel: "$",
 			priority: SHELL_ONLY_MODE_PRIORITY,
-			borderColor: "warning",
+			borderColor: "thinkingLow",
 		});
 	}
 
